@@ -1,5 +1,124 @@
 # Changelog
 
+## [0.10.0](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.11...v0.10.0) - 2025-03-16
+
+### Added
+
+- add global `types` cache making `get_type_by_name` redundant ([#370](https://github.com/makspll/bevy_mod_scripting/pull/370))
+- :sparkles: Parallelizable Script Systems with `Res` and `Query` parameters & Schedule debugging utilities ([#361](https://github.com/makspll/bevy_mod_scripting/pull/361))
+- Add missing `luau` extension, improve extension configuration options ([#366](https://github.com/makspll/bevy_mod_scripting/pull/366))
+- *(ladfile)* improve globals in LAD format ([#372](https://github.com/makspll/bevy_mod_scripting/pull/372))
+- [**breaking**] re-design `GetTypeDependencies` trait & add `GetTypeDependencies` derive macro ([#369](https://github.com/makspll/bevy_mod_scripting/pull/369))
+- shorten import paths ([#367](https://github.com/makspll/bevy_mod_scripting/pull/367))
+- allow lua scripts to insert `ScriptComponent`'s ([#359](https://github.com/makspll/bevy_mod_scripting/pull/359))
+
+### Fixed
+
+- [**breaking**] script contexts being completely overwritten on a re-load ([#345](https://github.com/makspll/bevy_mod_scripting/pull/345))
+- unit enum variants other than `Option::None` being converted into `ScriptValue::Unit` ([#360](https://github.com/makspll/bevy_mod_scripting/pull/360))
+
+### Other
+
+- [**breaking**] Merge `ScriptContexts<T>` into `Scripts<T>` + Remove `Sync` bound from Contexts ([#350](https://github.com/makspll/bevy_mod_scripting/pull/350))
+
+## [0.9.11](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.10...v0.9.11) - 2025-03-03
+
+### Fixed
+
+- plugin registration order affecting which globals are exported ([#346](https://github.com/makspll/bevy_mod_scripting/pull/346))
+
+## [0.9.10](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.9...v0.9.10) - 2025-03-03
+
+### Added
+
+- add `map_get` function for cloning and returning values on a map ([#343](https://github.com/makspll/bevy_mod_scripting/pull/343))
+- *(bms,ladfile_builder)* introduce app global instance registry and export them in `ladfile_builder` ([#340](https://github.com/makspll/bevy_mod_scripting/pull/340))
+
+## [0.9.9](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.8...v0.9.9) - 2025-02-28
+
+### Added
+
+- Add `GlobalNamespace::system_builder`, `World::add_system` and allow dynamic system creation (#335)
+- add `WithWorldGuard` and `HandlerContext` system parameters (#327)
+- add test for construct using unit struct (#328)
+- support setting hashmaps via reflection (#330)
+- allow hashmap `FromScript` from list of tuples (#332)
+
+## [0.9.8](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.7...v0.9.8) - 2025-02-25
+
+### Added
+
+- Allow trailing comma in callback_labels. (#325)
+
+### Fixed
+
+- `enable_context_sharing` not returning the plugin like a real builder
+
+## [0.9.7](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.6...v0.9.7) - 2025-02-23
+
+### Added
+
+- create `ScriptingDocgenPlugin` to allow exporting `LAD` files + export BMS bindings (#303)
+- add global functions to mdbook, allow documenting arguments and return values (#296)
+- separate `ladfile` into `ladfile_builder` and `ladfile` crates (#293)
+- add `construct` global for constructing arbitrary types & `Union` type (#302)
+- pre-register reflected components with the world at finalize (#314)
+- add allocator diagnostics (#305)
+- improve warning on missing asset (#295)
+
+### Fixed
+
+- functions not releasing accesses correctly on error (#315)
+- remove `reflect_functions` and `file_watcher` flags from bevy dependency (#316)
+
+## [0.9.6](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.5...v0.9.6) - 2025-02-15
+
+### Added
+
+- create mdbook backend for LAD files (#287)
+
+### Fixed
+
+- compilation error with `bevy/trace_tracy` (#289)
+
+## [0.9.5](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.4...v0.9.5) - 2025-02-12
+
+### Added
+
+- update bevy to 0.15.2 (#280)
+
+## [0.9.4](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.3...v0.9.4) - 2025-02-12
+
+### Added
+
+- create `Language Agnostic Declaration` file format and `ladfile` crate (#274)
+- Add `script_bindings` impl block derive macro (#263)
+- add `TypedThrough` abstraction to function meta, and refactor (#272)
+- refactor generated bindings to use new derive macro (#268)
+- refactor core bindings to use new derive macro (#267)
+
+### Fixed
+
+- fix tracy compile errors and add tracy buid to CI (#277)
+- don't use `new_unregistered` for most of core bindings macros (#270)
+
+## [0.9.3](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.2...v0.9.3) - 2025-02-08
+
+### Added
+
+- add static scripts which do not need to be attached to entities to be run (#253)
+- add recipient for specific language (#250)
+
+## [0.9.2](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.1...v0.9.2) - 2025-02-08
+
+### Added
+
+- make `extractors` module non-public (#251)
+
+### Fixed
+
+- add missing extensions in the asset loader (#254)
+
 ## [0.9.1](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.0...v0.9.1) - 2025-02-01
 
 ### Fixed

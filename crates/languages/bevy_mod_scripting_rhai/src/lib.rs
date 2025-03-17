@@ -2,14 +2,13 @@
 
 use bevy::{
     app::Plugin,
-    asset::AssetPath,
     ecs::{entity::Entity, world::World},
 };
 use bevy_mod_scripting_core::{
-    asset::{AssetPathToLanguageMapper, Language},
+    asset::Language,
     bindings::{
-        function::namespace::Namespace, script_value::ScriptValue, ThreadWorldContainer,
-        WorldContainer,
+        function::namespace::Namespace, globals::AppScriptGlobalsRegistry,
+        script_value::ScriptValue, ThreadWorldContainer, WorldContainer,
     },
     context::{ContextBuilder, ContextInitializer, ContextPreHandlingInitializer},
     error::ScriptError,
@@ -23,6 +22,7 @@ use bindings::{
     reference::{ReservedKeyword, RhaiReflectReference, RhaiStaticReflectReference},
     script_value::{FromDynamic, IntoDynamic},
 };
+use parking_lot::RwLock;
 use rhai::{CallFnOptions, Dynamic, Engine, EvalAltResult, Scope, AST};
 
 pub use rhai;
@@ -30,7 +30,7 @@ pub use rhai;
 pub mod bindings;
 
 /// The rhai runtime type.
-pub type RhaiRuntime = Engine;
+pub type RhaiRuntime = RwLock<Engine>;
 
 /// The rhai context type.
 pub struct RhaiScriptContext {
@@ -47,7 +47,7 @@ impl IntoScriptPluginParams for RhaiScriptingPlugin {
     const LANGUAGE: Language = Language::Rhai;
 
     fn build_runtime() -> Self::R {
-        RhaiRuntime::new()
+        Engine::new().into()
     }
 }
 
@@ -67,12 +67,14 @@ impl Default for RhaiScriptingPlugin {
     fn default() -> Self {
         RhaiScriptingPlugin {
             scripting_plugin: ScriptingPlugin {
-                context_assigner: Default::default(),
+                context_assignment_strategy: Default::default(),
                 runtime_settings: RuntimeSettings {
-                    initializers: vec![|runtime: &mut Engine| {
-                        runtime.build_type::<RhaiReflectReference>();
-                        runtime.build_type::<RhaiStaticReflectReference>();
-                        runtime.register_iterator_result::<RhaiReflectReference, _>();
+                    initializers: vec![|runtime: &RhaiRuntime| {
+                        let mut engine = runtime.write();
+                        engine.set_max_expr_depths(999, 999);
+                        engine.build_type::<RhaiReflectReference>();
+                        engine.build_type::<RhaiStaticReflectReference>();
+                        engine.register_iterator_result::<RhaiReflectReference, _>();
                         Ok(())
                     }],
                 },
@@ -80,9 +82,6 @@ impl Default for RhaiScriptingPlugin {
                 context_builder: ContextBuilder {
                     load: rhai_context_load,
                     reload: rhai_context_reload,
-                },
-                language_mapper: AssetPathToLanguageMapper {
-                    map: rhai_language_mapper,
                 },
                 context_initializers: vec![
                     |_, context: &mut RhaiScriptContext| {
@@ -95,21 +94,22 @@ impl Default for RhaiScriptingPlugin {
                     |_, context: &mut RhaiScriptContext| {
                         // initialize global functions
                         let world = ThreadWorldContainer.try_get_world()?;
-                        let type_registry = world.type_registry();
-                        let type_registry = type_registry.read();
+                        let globals_registry =
+                            world.with_resource(|r: &AppScriptGlobalsRegistry| r.clone())?;
+                        let globals_registry = globals_registry.read();
 
-                        for registration in type_registry.iter() {
-                            // only do this for non generic types
-                            // we don't want to see `Vec<Entity>:function()` in lua
-                            if !registration.type_info().generics().is_empty() {
-                                continue;
-                            }
-
-                            if let Some(global_name) =
-                                registration.type_info().type_path_table().ident()
-                            {
-                                let ref_ = RhaiStaticReflectReference(registration.type_id());
-                                context.scope.set_or_push(global_name, ref_);
+                        for (key, global) in globals_registry.iter() {
+                            match &global.maker {
+                                Some(maker) => {
+                                    let global = (maker)(world.clone())?;
+                                    context
+                                        .scope
+                                        .set_or_push(key.to_string(), global.into_dynamic()?);
+                                }
+                                None => {
+                                    let ref_ = RhaiStaticReflectReference(global.type_id);
+                                    context.scope.set_or_push(key.to_string(), ref_);
+                                }
                             }
                         }
 
@@ -155,15 +155,11 @@ impl Default for RhaiScriptingPlugin {
                     context.scope.set_or_push("script_id", script.to_owned());
                     Ok(())
                 }],
+                // already supported by BMS core
+                additional_supported_extensions: &[],
+                language: Language::Rhai,
             },
         }
-    }
-}
-
-fn rhai_language_mapper(path: &AssetPath) -> Language {
-    match path.path().extension().and_then(|ext| ext.to_str()) {
-        Some("rhai") => Language::Rhai,
-        _ => Language::Unknown,
     }
 }
 
@@ -171,6 +167,36 @@ impl Plugin for RhaiScriptingPlugin {
     fn build(&self, app: &mut bevy::prelude::App) {
         self.scripting_plugin.build(app);
     }
+
+    fn finish(&self, app: &mut bevy::app::App) {
+        self.scripting_plugin.finish(app);
+    }
+}
+
+// NEW helper function to load content into an existing context without clearing previous definitions.
+fn load_rhai_content_into_context(
+    context: &mut RhaiScriptContext,
+    script: &ScriptId,
+    content: &[u8],
+    initializers: &[ContextInitializer<RhaiScriptingPlugin>],
+    pre_handling_initializers: &[ContextPreHandlingInitializer<RhaiScriptingPlugin>],
+    runtime: &RhaiRuntime,
+) -> Result<(), ScriptError> {
+    let runtime = runtime.read();
+
+    context.ast = runtime.compile(std::str::from_utf8(content)?)?;
+    context.ast.set_source(script.to_string());
+
+    initializers
+        .iter()
+        .try_for_each(|init| init(script, context))?;
+    pre_handling_initializers
+        .iter()
+        .try_for_each(|init| init(script, Entity::from_raw(0), context))?;
+    runtime.eval_ast_with_scope(&mut context.scope, &context.ast)?;
+
+    context.ast.clear_statements();
+    Ok(())
 }
 
 /// Load a rhai context from a script.
@@ -179,47 +205,41 @@ pub fn rhai_context_load(
     content: &[u8],
     initializers: &[ContextInitializer<RhaiScriptingPlugin>],
     pre_handling_initializers: &[ContextPreHandlingInitializer<RhaiScriptingPlugin>],
-    runtime: &mut RhaiRuntime,
+    runtime: &RhaiRuntime,
 ) -> Result<RhaiScriptContext, ScriptError> {
-    let mut ast = runtime.compile(std::str::from_utf8(content)?)?;
-    ast.set_source(script.to_string());
-
     let mut context = RhaiScriptContext {
-        ast,
+        // Using an empty AST as a placeholder.
+        ast: AST::empty(),
         scope: Scope::new(),
     };
-    initializers
-        .iter()
-        .try_for_each(|init| init(script, &mut context))?;
-
-    pre_handling_initializers
-        .iter()
-        .try_for_each(|init| init(script, Entity::from_raw(0), &mut context))?;
-
-    runtime.eval_ast_with_scope(&mut context.scope, &context.ast)?;
-    // do not invoke top level statements after the first time we run the script
-    context.ast.clear_statements();
-
-    Ok(context)
-}
-
-/// Reload a rhai context from a script.
-pub fn rhai_context_reload(
-    script: &ScriptId,
-    content: &[u8],
-    context: &mut RhaiScriptContext,
-    initializers: &[ContextInitializer<RhaiScriptingPlugin>],
-    pre_handling_initializers: &[ContextPreHandlingInitializer<RhaiScriptingPlugin>],
-    runtime: &mut RhaiRuntime,
-) -> Result<(), ScriptError> {
-    *context = rhai_context_load(
+    load_rhai_content_into_context(
+        &mut context,
         script,
         content,
         initializers,
         pre_handling_initializers,
         runtime,
     )?;
-    Ok(())
+    Ok(context)
+}
+
+/// Reload a rhai context from a script. New content is appended to the existing context.
+pub fn rhai_context_reload(
+    script: &ScriptId,
+    content: &[u8],
+    context: &mut RhaiScriptContext,
+    initializers: &[ContextInitializer<RhaiScriptingPlugin>],
+    pre_handling_initializers: &[ContextPreHandlingInitializer<RhaiScriptingPlugin>],
+    runtime: &RhaiRuntime,
+) -> Result<(), ScriptError> {
+    load_rhai_content_into_context(
+        context,
+        script,
+        content,
+        initializers,
+        pre_handling_initializers,
+        runtime,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -231,7 +251,7 @@ pub fn rhai_callback_handler(
     callback: &CallbackLabel,
     context: &mut RhaiScriptContext,
     pre_handling_initializers: &[ContextPreHandlingInitializer<RhaiScriptingPlugin>],
-    runtime: &mut RhaiRuntime,
+    runtime: &RhaiRuntime,
 ) -> Result<ScriptValue, ScriptError> {
     pre_handling_initializers
         .iter()
@@ -250,6 +270,8 @@ pub fn rhai_callback_handler(
         script_id,
         args
     );
+    let runtime = runtime.read();
+
     match runtime.call_fn_with_options::<Dynamic>(
         options,
         &mut context.scope,
@@ -270,5 +292,47 @@ pub fn rhai_callback_handler(
                 Err(ScriptError::from(e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_reload_doesnt_overwrite_old_context() {
+        let runtime = RhaiRuntime::new(Engine::new());
+        let script_id = ScriptId::from("asd.rhai");
+        let initializers: Vec<ContextInitializer<RhaiScriptingPlugin>> = vec![];
+        let pre_handling_initializers: Vec<ContextPreHandlingInitializer<RhaiScriptingPlugin>> =
+            vec![];
+
+        // Load first content defining a function that returns 42.
+        let mut context = rhai_context_load(
+            &script_id,
+            b"let hello = 2;",
+            &initializers,
+            &pre_handling_initializers,
+            &runtime,
+        )
+        .unwrap();
+
+        // Reload with additional content defining a second function that returns 24.
+        rhai_context_reload(
+            &script_id,
+            b"let hello2 = 3",
+            &mut context,
+            &initializers,
+            &pre_handling_initializers,
+            &runtime,
+        )
+        .unwrap();
+
+        // get first var
+        let hello = context.scope.get_value::<i64>("hello").unwrap();
+        assert_eq!(hello, 2);
+        // get second var
+        let hello2 = context.scope.get_value::<i64>("hello2").unwrap();
+        assert_eq!(hello2, 3);
     }
 }

@@ -4,15 +4,19 @@ use crate::{
     bindings::{ReflectReference, WorldGuard},
     error::InteropError,
 };
-use bevy::reflect::{
-    func::Return, FromReflect, PartialReflect, Reflect, ReflectFromReflect, ReflectMut, TypeInfo,
-};
+use bevy::reflect::{PartialReflect, Reflect, ReflectFromReflect, ReflectMut, TypeInfo};
 use std::{
     any::{Any, TypeId},
     cmp::max,
 };
 /// Extension trait for [`PartialReflect`] providing additional functionality for working with specific types.
 pub trait PartialReflectExt {
+    /// Try to get a reference to the given key in an underyling map, if the type is a map.
+    fn try_map_get(
+        &self,
+        key: &dyn PartialReflect,
+    ) -> Result<Option<&dyn PartialReflect>, InteropError>;
+
     /// Try to remove the value at the given key, if the type supports removing with the given key.
     fn try_remove_boxed(
         &mut self,
@@ -134,10 +138,12 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
 
     fn as_option(&self) -> Result<Option<&dyn PartialReflect>, InteropError> {
         if let bevy::reflect::ReflectRef::Enum(e) = self.reflect_ref() {
-            if let Some(field) = e.field_at(0) {
-                return Ok(Some(field));
-            } else {
-                return Ok(None);
+            if e.is_type(Some("core"), "Option") {
+                if let Some(field) = e.field_at(0) {
+                    return Ok(Some(field));
+                } else {
+                    return Ok(None);
+                }
             }
         }
 
@@ -314,6 +320,20 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
         }
     }
 
+    fn try_map_get(
+        &self,
+        key: &dyn PartialReflect,
+    ) -> Result<Option<&dyn PartialReflect>, InteropError> {
+        match self.reflect_ref() {
+            bevy::reflect::ReflectRef::Map(m) => Ok(m.get(key)),
+            _ => Err(InteropError::unsupported_operation(
+                self.get_represented_type_info().map(|ti| ti.type_id()),
+                None,
+                "map_get".to_owned(),
+            )),
+        }
+    }
+
     fn try_pop_boxed(&mut self) -> Result<Box<dyn PartialReflect>, InteropError> {
         match self.reflect_mut() {
             bevy::reflect::ReflectMut::List(l) => l.pop().ok_or_else(|| {
@@ -421,6 +441,10 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
 
 /// Extension trait for TypeInfos providing additional functionality for working with type information.
 pub trait TypeInfoExtensions {
+    /// Returns true if the type is a result.
+    fn is_result(&self) -> bool;
+    /// Returns the inner type of the map if the type is a map, otherwise
+    fn map_inner_types(&self) -> Option<(TypeId, TypeId)>;
     /// Returns the inner type of the list if the type is a list, otherwise None.
     fn list_inner_type(&self) -> Option<TypeId>;
     /// Returns true if the type is a list.
@@ -436,6 +460,10 @@ pub trait TypeInfoExtensions {
 impl TypeInfoExtensions for TypeInfo {
     fn is_option(&self) -> bool {
         self.is_type(Some("core"), "Option")
+    }
+
+    fn is_result(&self) -> bool {
+        self.is_type(Some("core"), "Result")
     }
 
     fn is_list(&self) -> bool {
@@ -454,40 +482,14 @@ impl TypeInfoExtensions for TypeInfo {
         Some(self.as_list().ok()?.item_ty().id())
     }
 
+    fn map_inner_types(&self) -> Option<(TypeId, TypeId)> {
+        let map = self.as_map().ok()?;
+        Some((map.key_ty().id(), map.value_ty().id()))
+    }
+
     fn is_type(&self, crate_name: Option<&str>, type_ident: &str) -> bool {
         self.type_path_table().ident() == Some(type_ident)
             && self.type_path_table().crate_name() == crate_name
-    }
-}
-
-/// Extension trait for [`Return`] providing additional functionality for working with return values.
-pub trait ReturnValExt<'a> {
-    /// Try to convert the return value into the concrete type, or return a boxed partial reflect if the conversion fails.
-    fn try_into_or_boxed<T: PartialReflect + FromReflect>(
-        self,
-    ) -> Result<T, Box<dyn PartialReflect>>;
-
-    /// Get a reference to the partial reflect value.
-    fn as_ref(&'a self) -> &'a dyn PartialReflect;
-}
-
-impl<'a> ReturnValExt<'a> for Return<'a> {
-    fn as_ref(&'a self) -> &'a dyn PartialReflect {
-        match self {
-            Return::Owned(f) => f.as_partial_reflect(),
-            Return::Ref(r) => r.as_partial_reflect(),
-            Return::Mut(r) => r.as_partial_reflect(),
-        }
-    }
-
-    fn try_into_or_boxed<T: PartialReflect + FromReflect>(
-        self,
-    ) -> Result<T, Box<dyn PartialReflect>> {
-        match self {
-            Return::Owned(partial_reflect) => partial_reflect.try_take::<T>(),
-            Return::Ref(r) => T::from_reflect(r).ok_or_else(|| r.clone_value()),
-            Return::Mut(r) => T::from_reflect(r).ok_or_else(|| r.clone_value()),
-        }
     }
 }
 
@@ -541,7 +543,13 @@ mod test {
 
     #[test]
     fn test_as_option_none() {
+        #[derive(Reflect)]
+        enum Test {
+            Unit,
+        }
+
         assert!(None::<i32>.as_option().unwrap().is_none());
+        assert!(Test::Unit.as_option().is_err())
     }
 
     #[test]

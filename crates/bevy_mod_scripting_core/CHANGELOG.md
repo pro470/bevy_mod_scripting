@@ -7,69 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.0-alpha.9](https://github.com/makspll/bevy_mod_scripting/compare/bevy_mod_scripting_core-v0.9.0-alpha.8...bevy_mod_scripting_core-v0.9.0-alpha.9) - 2025-01-28
+## [0.10.0](https://github.com/makspll/bevy_mod_scripting/compare/bevy_mod_scripting_core-v0.9.11...bevy_mod_scripting_core-v0.10.0) - 2025-03-16
+
+### Added
+
+- *(ladfile)* improve globals in LAD format ([#372](https://github.com/makspll/bevy_mod_scripting/pull/372))
+- add global `types` cache making `get_type_by_name` redundant ([#370](https://github.com/makspll/bevy_mod_scripting/pull/370))
+- [**breaking**] re-design `GetTypeDependencies` trait & add `GetTypeDependencies` derive macro ([#369](https://github.com/makspll/bevy_mod_scripting/pull/369))
+- shorten import paths ([#367](https://github.com/makspll/bevy_mod_scripting/pull/367))
+- Add missing `luau` extension, improve extension configuration options ([#366](https://github.com/makspll/bevy_mod_scripting/pull/366))
+- allow lua scripts to insert `ScriptComponent`'s ([#359](https://github.com/makspll/bevy_mod_scripting/pull/359))
+- :sparkles: Parallelizable Script Systems with `Res` and `Query` parameters & Schedule debugging utilities ([#361](https://github.com/makspll/bevy_mod_scripting/pull/361))
 
 ### Fixed
 
-- prevent allocation and component ID ranges from overlapping (#230)
-
-## [0.9.0-alpha.8](https://github.com/makspll/bevy_mod_scripting/compare/bevy_mod_scripting_core-v0.9.0-alpha.7...bevy_mod_scripting_core-v0.9.0-alpha.8) - 2025-01-27
-
-### Added
-
-- Add `functions` script method, and create function info scaffolding (#228)
-- Call custom `get` and `set` functions on the type when indexing. (#226)
-- Add `optional` arguments to script functions (#225)
-- re-implement rhai again (#222)
-- Add world.with_or_insert_component_mut() (#223)
-
-## [0.9.0-alpha.7](https://github.com/makspll/bevy_mod_scripting/compare/bevy_mod_scripting_core-v0.9.0-alpha.6...bevy_mod_scripting_core-v0.9.0-alpha.7) - 2025-01-20
-
-### Added
-
-- [**breaking**] Remove `WorldCallbackAccess` & Combine context args for dynamic functions into one `FunctionCallContext` (#219)
-- Add component `upsert` function (#218)
-
-## [0.9.0-alpha.6](https://github.com/makspll/bevy_mod_scripting/compare/bevy_mod_scripting_core-v0.9.0-alpha.5...bevy_mod_scripting_core-v0.9.0-alpha.6) - 2025-01-19
-
-### Added
-
-- Don't panic! (#216)
-
-## [0.9.0-alpha.3](https://github.com/makspll/bevy_mod_scripting/compare/bevy_mod_scripting_core-v0.9.0-alpha.2...bevy_mod_scripting_core-v0.9.0-alpha.3) - 2025-01-14
-
-### Added
-
-- Implement global namespace registration (#202)
-- Improvements to BMS in multi-language context (#194)
-- make script contexts public (#193)
-
-## [0.9.0-alpha.2](https://github.com/makspll/bevy_mod_scripting/compare/bevy_mod_scripting_core-v0.9.0-alpha.1...bevy_mod_scripting_core-v0.9.0-alpha.2) - 2025-01-05
-
-### Added
-
-- complete plugin re-write
+- supported extensions not including default extensions [SKIP_CHANGELOG] ([#373](https://github.com/makspll/bevy_mod_scripting/pull/373))
+- unit enum variants other than `Option::None` being converted into `ScriptValue::Unit` ([#360](https://github.com/makspll/bevy_mod_scripting/pull/360))
 
 ### Other
 
-- ditch alpha pre-releases ([#162](https://github.com/makspll/bevy_mod_scripting/pull/162))
-
-## [0.8.0-alpha.2](https://github.com/makspll/bevy_mod_scripting/compare/bevy_mod_scripting_core-v0.8.0-alpha.1...bevy_mod_scripting_core-v0.8.0-alpha.2) - 2024-12-03
-
-### Other
-
-- Bump bevy & bevy console ([#153](https://github.com/makspll/bevy_mod_scripting/pull/153))
-
-## [0.8.0-alpha.1](https://github.com/makspll/bevy_mod_scripting/compare/bevy_mod_scripting_core-v0.8.0-alpha.0...bevy_mod_scripting_core-v0.8.0-alpha.1) - 2024-11-10
-
-### Other
-
-- update Cargo.toml dependencies
-
-## [0.7.0](https://github.com/makspll/bevy_mod_scripting/compare/bevy_mod_scripting_core-v0.6.0...bevy_mod_scripting_core-v0.7.0) - 2024-11-03
-
-### Other
-
-- Send ScriptErrorEvent when load fails. ([#125](https://github.com/makspll/bevy_mod_scripting/pull/125))
-- Migrate to bevy 0.14 ([#127](https://github.com/makspll/bevy_mod_scripting/pull/127))
-- update metadata
+- [**breaking**] Merge `ScriptContexts<T>` into `Scripts<T>` + Remove `Sync` bound from Contexts ([#350](https://github.com/makspll/bevy_mod_scripting/pull/350))

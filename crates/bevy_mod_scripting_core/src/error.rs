@@ -1,16 +1,22 @@
 //! Errors that can occur when interacting with the scripting system
 
-use crate::bindings::{
-    access_map::{DisplayCodeLocation, ReflectAccessId},
-    function::namespace::Namespace,
-    pretty_print::DisplayWithWorld,
-    script_value::ScriptValue,
-    ReflectBaseType, ReflectReference,
+use crate::{
+    bindings::{
+        access_map::{DisplayCodeLocation, ReflectAccessId},
+        function::namespace::Namespace,
+        pretty_print::DisplayWithWorld,
+        script_value::ScriptValue,
+        ReflectBaseType, ReflectReference,
+    },
+    script::ScriptId,
 };
 use bevy::{
-    ecs::component::ComponentId,
+    ecs::{
+        component::ComponentId,
+        schedule::{ScheduleBuildError, ScheduleNotInitialized},
+    },
     prelude::Entity,
-    reflect::{func::FunctionError, PartialReflect, Reflect},
+    reflect::{PartialReflect, Reflect},
 };
 use std::{
     any::TypeId,
@@ -51,9 +57,9 @@ pub struct ScriptErrorInner {
 /// The kind of error that occurred
 pub enum ErrorKind {
     /// An error that can be displayed
-    Display(Box<dyn std::error::Error + Send + Sync>),
+    Display(Box<dyn std::error::Error + Send + Sync + 'static>),
     /// An error that can be displayed with a world
-    WithWorld(Box<dyn DisplayWithWorld + Send + Sync>),
+    WithWorld(Box<dyn DisplayWithWorld + Send + Sync + 'static>),
 }
 
 impl DisplayWithWorld for ErrorKind {
@@ -85,6 +91,21 @@ impl PartialEq for ScriptErrorInner {
 }
 
 impl ScriptError {
+    /// Tried to downcast a script error to an interop error
+    pub fn downcast_interop_inner(&self) -> Option<&InteropErrorInner> {
+        match self.reason.as_ref() {
+            ErrorKind::WithWorld(display_with_world) => {
+                let any: &dyn DisplayWithWorld = display_with_world.as_ref();
+                if let Some(interop_error) = any.downcast_ref::<InteropError>() {
+                    Some(interop_error.inner())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     #[cfg(feature = "mlua_impls")]
     /// Destructures mlua error into a script error, taking care to preserve as much information as possible
     pub fn from_mlua_error(error: mlua::Error) -> Self {
@@ -202,6 +223,18 @@ impl DisplayWithWorld for ScriptError {
     }
 }
 
+impl From<ScheduleBuildError> for InteropError {
+    fn from(value: ScheduleBuildError) -> Self {
+        InteropError::external_error(Box::new(value))
+    }
+}
+
+impl From<ScheduleNotInitialized> for InteropError {
+    fn from(value: ScheduleNotInitialized) -> Self {
+        InteropError::external_error(Box::new(value))
+    }
+}
+
 #[cfg(feature = "mlua_impls")]
 impl From<ScriptError> for mlua::Error {
     fn from(value: ScriptError) -> Self {
@@ -281,8 +314,9 @@ impl Display for MissingResourceError {
 impl std::error::Error for MissingResourceError {}
 
 #[derive(Debug, Clone, PartialEq, Reflect)]
+#[reflect(opaque)]
 /// An error thrown when interoperating with scripting languages.
-pub struct InteropError(#[reflect(ignore)] Arc<InteropErrorInner>);
+pub struct InteropError(Arc<InteropErrorInner>);
 
 impl std::error::Error for InteropError {}
 
@@ -481,13 +515,6 @@ impl InteropError {
         }))
     }
 
-    /// Thrown when the error happens after a function call, and an error is thrown by bevy.
-    ///
-    /// I.e. mismatch in args, or invalid number of arguments
-    pub fn function_call_error(inner: FunctionError) -> Self {
-        Self(Arc::new(InteropErrorInner::FunctionCallError { inner }))
-    }
-
     /// Thrown when an error happens during argument conversion in a function call
     pub fn function_arg_conversion_error(argument: String, error: InteropError) -> Self {
         Self(Arc::new(InteropErrorInner::FunctionArgConversionError {
@@ -518,11 +545,11 @@ impl InteropError {
     }
 
     /// Thrown when an invalid access count is detected
-    pub fn invalid_access_count(count: usize, expected: usize, context: String) -> Self {
+    pub fn invalid_access_count(count: usize, expected: usize, context: impl Display) -> Self {
         Self(Arc::new(InteropErrorInner::InvalidAccessCount {
             count,
             expected,
-            context,
+            context: context.to_string(),
         }))
     }
 
@@ -536,15 +563,73 @@ impl InteropError {
             },
         ))
     }
+
+    /// Thrown when constructing types and we find missing data needed to construct the type
+    pub fn missing_data_in_constructor(
+        type_id: TypeId,
+        missing_data_name: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self(Arc::new(InteropErrorInner::MissingDataInConstructor {
+            type_id,
+            missing_data_name: missing_data_name.into(),
+        }))
+    }
+
+    /// Thrown if an enum variant is invalid.
+    pub fn invalid_enum_variant(type_id: TypeId, variant_name: impl ToString) -> Self {
+        Self(Arc::new(InteropErrorInner::InvalidEnumVariant {
+            type_id,
+            variant_name: variant_name.to_string(),
+        }))
+    }
+
+    /// Thrown when the number of arguments in a function call does not match.
+    pub fn argument_count_mismatch(expected: usize, got: usize) -> Self {
+        Self(Arc::new(InteropErrorInner::ArgumentCountMismatch {
+            expected,
+            got,
+        }))
+    }
+
+    /// Thrown if a script could not be found when trying to call a synchronous callback or otherwise
+    pub fn missing_script(script_id: impl Into<ScriptId>) -> Self {
+        Self(Arc::new(InteropErrorInner::MissingScript {
+            script_id: script_id.into(),
+        }))
+    }
+
+    /// Thrown if the required context for an operation is missing.
+    pub fn missing_context(script_id: impl Into<ScriptId>) -> Self {
+        Self(Arc::new(InteropErrorInner::MissingContext {
+            script_id: script_id.into(),
+        }))
+    }
+
+    /// Thrown when a schedule is missing from the registry.
+    pub fn missing_schedule(schedule_name: impl Into<Cow<'static, str>>) -> Self {
+        Self(Arc::new(InteropErrorInner::MissingSchedule {
+            schedule_name: schedule_name.into(),
+        }))
+    }
+
+    /// Returns the inner error
+    pub fn inner(&self) -> &InteropErrorInner {
+        &self.0
+    }
 }
 
 /// For errors to do with reflection, type conversions or other interop issues
 #[derive(Debug)]
-pub(crate) enum InteropErrorInner {
+pub enum InteropErrorInner {
     /// Thrown if a callback requires world access, but is unable to do so due
     StaleWorldAccess,
     /// Thrown if a callback requires world access, but is unable to do so due
     MissingWorld,
+    /// Thrown if a script could not be found when trying to call a synchronous callback.
+    MissingScript {
+        /// The script id that was not found.
+        script_id: ScriptId,
+    },
     /// Thrown if a base type is not registered with the reflection system
     UnregisteredBase {
         /// The base type that was not registered
@@ -665,11 +750,6 @@ pub(crate) enum InteropErrorInner {
         /// The component that was invalid
         component_id: ComponentId,
     },
-    /// Thrown when an error happens in a function call
-    FunctionCallError {
-        /// The inner error that occurred
-        inner: FunctionError,
-    },
     /// Thrown when an error happens during argument conversion in a function call
     MissingFunctionError {
         /// The type that the function was attempted to be called on
@@ -703,10 +783,41 @@ pub(crate) enum InteropErrorInner {
         /// The type that was not registered
         type_name: Cow<'static, str>,
     },
+    /// Thrown when constructing types and we find missing data
+    MissingDataInConstructor {
+        /// The type id of the type we're constructing
+        type_id: TypeId,
+        /// the name of the missing data
+        missing_data_name: Cow<'static, str>,
+    },
     /// Thrown when an invariant is violated
     Invariant {
         /// The message that describes the invariant violation
         message: String,
+    },
+    /// New variant for invalid enum variant errors.
+    InvalidEnumVariant {
+        /// the enum type id
+        type_id: TypeId,
+        /// the variant
+        variant_name: String,
+    },
+    /// Thrown when the number of arguments in a function call does not match.
+    ArgumentCountMismatch {
+        /// The number of arguments that were expected
+        expected: usize,
+        /// The number of arguments that were received
+        got: usize,
+    },
+    /// Thrown if the required context for an operation is missing.
+    MissingContext {
+        /// The script that was attempting to access the context
+        script_id: ScriptId,
+    },
+    /// Thrown when a schedule is missing from the registry.
+    MissingSchedule {
+        /// The name of the schedule that was missing
+        schedule_name: Cow<'static, str>,
     },
 }
 
@@ -714,6 +825,22 @@ pub(crate) enum InteropErrorInner {
 impl PartialEq for InteropErrorInner {
     fn eq(&self, _other: &Self) -> bool {
         match (self, _other) {
+            (
+                InteropErrorInner::MissingScript { script_id: a },
+                InteropErrorInner::MissingScript { script_id: b },
+            ) => a == b,
+            (
+                InteropErrorInner::InvalidAccessCount {
+                    count: a,
+                    expected: b,
+                    context: c,
+                },
+                InteropErrorInner::InvalidAccessCount {
+                    count: d,
+                    expected: e,
+                    context: f,
+                },
+            ) => a == d && b == e && c == f,
             (InteropErrorInner::StaleWorldAccess, InteropErrorInner::StaleWorldAccess) => true,
             (InteropErrorInner::MissingWorld, InteropErrorInner::MissingWorld) => true,
             (
@@ -849,10 +976,6 @@ impl PartialEq for InteropErrorInner {
                 InteropErrorInner::InvalidComponent { component_id: b },
             ) => a == b,
             (
-                InteropErrorInner::FunctionCallError { inner: a },
-                InteropErrorInner::FunctionCallError { inner: b },
-            ) => a == b,
-            (
                 InteropErrorInner::MissingFunctionError {
                     on: a,
                     function_name: _b,
@@ -895,6 +1018,44 @@ impl PartialEq for InteropErrorInner {
             (
                 InteropErrorInner::Invariant { message: a },
                 InteropErrorInner::Invariant { message: b },
+            ) => a == b,
+            (
+                InteropErrorInner::MissingDataInConstructor {
+                    type_id: a,
+                    missing_data_name: b,
+                },
+                InteropErrorInner::MissingDataInConstructor {
+                    type_id: c,
+                    missing_data_name: d,
+                },
+            ) => a == c && b == d,
+            (
+                InteropErrorInner::InvalidEnumVariant {
+                    type_id: a,
+                    variant_name: b,
+                },
+                InteropErrorInner::InvalidEnumVariant {
+                    type_id: c,
+                    variant_name: d,
+                },
+            ) => a == c && b == d,
+            (
+                InteropErrorInner::ArgumentCountMismatch {
+                    expected: a,
+                    got: b,
+                },
+                InteropErrorInner::ArgumentCountMismatch {
+                    expected: c,
+                    got: d,
+                },
+            ) => a == c && b == d,
+            (
+                InteropErrorInner::MissingContext { script_id: b },
+                InteropErrorInner::MissingContext { script_id: d },
+            ) => b == d,
+            (
+                InteropErrorInner::MissingSchedule { schedule_name: a },
+                InteropErrorInner::MissingSchedule { schedule_name: b },
             ) => a == b,
             _ => false,
         }
@@ -1033,12 +1194,6 @@ macro_rules! function_arg_conversion_error {
     };
 }
 
-macro_rules! function_call_error {
-    ($inner:expr) => {
-        format!("Error in function call: {}", $inner)
-    };
-}
-
 macro_rules! better_conversion_exists {
     ($context:expr) => {
         format!("Unfinished conversion in context of: {}. A better conversion exists but caller didn't handle the case.", $context)
@@ -1063,6 +1218,15 @@ macro_rules! invalid_access_count {
     };
 }
 
+macro_rules! missing_data_in_constructor {
+    ($type_id:expr, $missing_data_name:expr) => {
+        format!(
+            "Missing data in constructor for type: {}. Missing data: {}",
+            $type_id, $missing_data_name
+        )
+    };
+}
+
 macro_rules! invariant {
     ($message:expr) => {
         format!(
@@ -1078,6 +1242,50 @@ macro_rules! unregistered_component_or_resource_type {
             "Expected registered component/resource but got unregistered type: {}",
             $type_name
         )
+    };
+}
+
+macro_rules! missing_script_for_callback {
+    ($script_id:expr) => {
+        format!(
+            "Could not find script with id: {}. Is the script loaded?",
+            $script_id
+        )
+    };
+}
+
+// Define a single macro for the invalid enum variant error.
+macro_rules! invalid_enum_variant_msg {
+    ($variant:expr, $enum_display:expr) => {
+        format!(
+            "Invalid enum variant: {} for enum: {}",
+            $variant, $enum_display
+        )
+    };
+}
+
+// Define a single macro for the argument count mismatch error.
+macro_rules! argument_count_mismatch_msg {
+    ($expected:expr, $got:expr) => {
+        format!(
+            "Argument count mismatch, expected: {}, got: {}",
+            $expected, $got
+        )
+    };
+}
+
+macro_rules! missing_context_for_callback {
+    ($script_id:expr) => {
+        format!(
+            "Missing context for script with id: {}. Was the script loaded?.",
+            $script_id
+        )
+    };
+}
+
+macro_rules! missing_schedule_error {
+    ($schedule:expr) => {
+        format!("Missing schedule: '{}'. This can happen if you try to access a schedule from within itself. Have all schedules been registered?", $schedule)
     };
 }
 
@@ -1171,7 +1379,7 @@ impl DisplayWithWorld for InteropErrorInner {
                     .to_owned()
             }
             InteropErrorInner::MissingWorld => {
-                "Missing world. The world was not initialized in the script context.".to_owned()
+                "Missing world. The world was either not initialized, or invalidated.".to_owned()
             },
             InteropErrorInner::FunctionInteropError { function_name, on, error } => {
                 let opt_on = match on {
@@ -1188,9 +1396,6 @@ impl DisplayWithWorld for InteropErrorInner {
             InteropErrorInner::FunctionArgConversionError { argument, error } => {
                 function_arg_conversion_error!(argument, error.display_with_world(world))
             },
-            InteropErrorInner::FunctionCallError { inner } => {
-                function_call_error!(inner)
-            },
             InteropErrorInner::BetterConversionExists{ context } => {
                 better_conversion_exists!(context)
             },
@@ -1206,6 +1411,26 @@ impl DisplayWithWorld for InteropErrorInner {
             },
             InteropErrorInner::UnregisteredComponentOrResourceType { type_name } => {
                 unregistered_component_or_resource_type!(type_name)
+            },
+            InteropErrorInner::MissingDataInConstructor { type_id, missing_data_name } => {
+                missing_data_in_constructor!(type_id.display_with_world(world), missing_data_name)
+            },
+            InteropErrorInner::InvalidEnumVariant { type_id, variant_name } => {
+                invalid_enum_variant_msg!(variant_name, type_id.display_with_world(world))
+            },
+            InteropErrorInner::ArgumentCountMismatch { expected, got } => {
+                argument_count_mismatch_msg!(expected, got)
+            },
+            InteropErrorInner::MissingScript { script_id } => {
+                missing_script_for_callback!(script_id)
+            },
+            InteropErrorInner::MissingContext { script_id } => {
+                missing_context_for_callback!(
+                    script_id
+                )
+            },
+            InteropErrorInner::MissingSchedule { schedule_name } => {
+                missing_schedule_error!(schedule_name)
             },
         }
     }
@@ -1300,7 +1525,7 @@ impl DisplayWithWorld for InteropErrorInner {
                     .to_owned()
             }
             InteropErrorInner::MissingWorld => {
-                "Missing world. The world was not initialized in the script context.".to_owned()
+                "Missing world. The world was either not initialized, or invalidated.".to_owned()
             },
             InteropErrorInner::FunctionInteropError { function_name, on, error } => {
                 let opt_on = match on {
@@ -1317,9 +1542,6 @@ impl DisplayWithWorld for InteropErrorInner {
             InteropErrorInner::FunctionArgConversionError { argument, error } => {
                 function_arg_conversion_error!(argument, error.display_without_world())
             },
-            InteropErrorInner::FunctionCallError { inner } => {
-                function_call_error!(inner)
-            },
             InteropErrorInner::BetterConversionExists{ context } => {
                 better_conversion_exists!(context)
             },
@@ -1335,6 +1557,26 @@ impl DisplayWithWorld for InteropErrorInner {
             },
             InteropErrorInner::UnregisteredComponentOrResourceType { type_name } => {
                 unregistered_component_or_resource_type!(type_name)
+            },
+            InteropErrorInner::MissingDataInConstructor { type_id, missing_data_name } => {
+                missing_data_in_constructor!(type_id.display_without_world(), missing_data_name)
+            },
+            InteropErrorInner::InvalidEnumVariant { type_id, variant_name } => {
+                invalid_enum_variant_msg!(variant_name, type_id.display_without_world())
+            },
+            InteropErrorInner::ArgumentCountMismatch { expected, got } => {
+                argument_count_mismatch_msg!(expected, got)
+            },
+            InteropErrorInner::MissingScript { script_id } => {
+                missing_script_for_callback!(script_id)
+            },
+            InteropErrorInner::MissingContext { script_id } => {
+                missing_context_for_callback!(
+                    script_id
+                )
+            },
+            InteropErrorInner::MissingSchedule { schedule_name } => {
+                missing_schedule_error!(schedule_name)
             },
         }
     }
@@ -1371,7 +1613,7 @@ mod test {
         let script_function_registry = AppScriptFunctionRegistry::default();
         world.insert_resource(script_function_registry);
 
-        let world_guard = WorldGuard::new(&mut world);
+        let world_guard = WorldGuard::new_exclusive(&mut world);
         assert_eq!(
             error.display_with_world(world_guard),
             format!(

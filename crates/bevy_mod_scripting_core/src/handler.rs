@@ -1,25 +1,25 @@
 //! Contains the logic for handling script callback events
-
 use crate::{
     bindings::{
         pretty_print::DisplayWithWorld, script_value::ScriptValue, ThreadWorldContainer,
         WorldContainer, WorldGuard,
     },
     context::ContextPreHandlingInitializer,
-    error::ScriptError,
+    error::{InteropErrorInner, ScriptError},
     event::{CallbackLabel, IntoCallbackLabel, ScriptCallbackEvent, ScriptErrorEvent},
-    extractors::{extract_handler_context, yield_handler_context, HandlerContext},
+    extractors::{HandlerContext, WithWorldGuard},
     script::{ScriptComponent, ScriptId},
     IntoScriptPluginParams,
 };
 use bevy::{
     ecs::{
         entity::Entity,
-        system::{Resource, SystemState},
-        world::World,
+        query::QueryState,
+        system::{Local, Resource, SystemState},
+        world::{Mut, World},
     },
     log::trace_once,
-    prelude::{EventReader, Events, Query, Ref},
+    prelude::{Events, Ref},
 };
 
 /// A function that handles a callback event
@@ -30,7 +30,7 @@ pub type HandlerFn<P> = fn(
     callback: &CallbackLabel,
     context: &mut <P as IntoScriptPluginParams>::C,
     pre_handling_initializers: &[ContextPreHandlingInitializer<P>],
-    runtime: &mut <P as IntoScriptPluginParams>::R,
+    runtime: &<P as IntoScriptPluginParams>::R,
 ) -> Result<ScriptValue, ScriptError>;
 
 /// A resource that holds the settings for the callback handler for a specific combination of type parameters
@@ -38,6 +38,14 @@ pub type HandlerFn<P> = fn(
 pub struct CallbackSettings<P: IntoScriptPluginParams> {
     /// The callback handler function
     pub callback_handler: HandlerFn<P>,
+}
+
+impl<P: IntoScriptPluginParams> Default for CallbackSettings<P> {
+    fn default() -> Self {
+        Self {
+            callback_handler: |_, _, _, _, _, _, _| Ok(ScriptValue::Unit),
+        }
+    }
 }
 
 impl<P: IntoScriptPluginParams> Clone for CallbackSettings<P> {
@@ -64,10 +72,10 @@ impl<P: IntoScriptPluginParams> CallbackSettings<P> {
         callback: &CallbackLabel,
         script_ctxt: &mut P::C,
         pre_handling_initializers: &[ContextPreHandlingInitializer<P>],
-        runtime: &mut P::R,
-        world: &mut World,
+        runtime: &P::R,
+        world: WorldGuard,
     ) -> Result<ScriptValue, ScriptError> {
-        WorldGuard::with_static_guard(world, |world| {
+        WorldGuard::with_existing_static_guard(world.clone(), |world| {
             ThreadWorldContainer.set_world(world)?;
             (handler)(
                 args,
@@ -94,31 +102,78 @@ macro_rules! push_err_and_continue {
     };
 }
 
-/// A utility to separate the event handling logic from the retrieval of the handler context
-#[profiling::function]
-pub(crate) fn event_handler_internal<L: IntoCallbackLabel, P: IntoScriptPluginParams>(
+/// Passes events with the specified label to the script callback with the same name and runs the callback.
+///
+/// If any of the resources required for the handler are missing, the system will log this issue and do nothing.
+#[allow(deprecated)]
+pub fn event_handler<L: IntoCallbackLabel, P: IntoScriptPluginParams>(
     world: &mut World,
-    res_ctxt: &mut HandlerContext<P>,
-    params: &mut SystemState<(
-        EventReader<ScriptCallbackEvent>,
-        Query<(Entity, Ref<ScriptComponent>)>,
-    )>,
+    state: &mut EventHandlerSystemState<P>,
 ) {
-    let (mut script_events, entities) = params.get_mut(world);
+    // we wrap the inner event handler, so that we can immediately re-insert all the resources back.
+    // otherwise this would happen in the next schedule
+    {
+        let (entity_query_state, script_events, handler_ctxt) = state.get_mut(world);
+        event_handler_inner::<P>(
+            L::into_callback_label(),
+            entity_query_state,
+            script_events,
+            handler_ctxt,
+        );
+    }
+    state.apply(world);
+}
+
+#[allow(deprecated)]
+pub(crate) type EventHandlerSystemState<'w, 's, P> = SystemState<(
+    Local<'s, QueryState<(Entity, Ref<'w, ScriptComponent>)>>,
+    crate::extractors::EventReaderScope<'s, ScriptCallbackEvent>,
+    WithWorldGuard<'w, 's, HandlerContext<'s, P>>,
+)>;
+
+#[profiling::function]
+#[allow(deprecated)]
+pub(crate) fn event_handler_inner<P: IntoScriptPluginParams>(
+    callback_label: CallbackLabel,
+    mut entity_query_state: Local<QueryState<(Entity, Ref<ScriptComponent>)>>,
+    mut script_events: crate::extractors::EventReaderScope<ScriptCallbackEvent>,
+    mut handler_ctxt: WithWorldGuard<HandlerContext<P>>,
+) {
+    let (guard, handler_ctxt) = handler_ctxt.get_mut();
 
     let mut errors = Vec::default();
 
     let events = script_events.read().cloned().collect::<Vec<_>>();
-    let entity_scripts = entities
-        .iter()
-        .map(|(e, s)| (e, s.0.clone()))
-        .collect::<Vec<_>>();
 
-    for event in events
-        .into_iter()
-        .filter(|e| e.label == L::into_callback_label())
-    {
-        for (entity, entity_scripts) in entity_scripts.iter() {
+    // query entities + chain static scripts
+    let entity_and_static_scripts = guard.with_global_access(|world| {
+        entity_query_state
+            .iter(world)
+            .map(|(e, s)| (e, s.0.clone()))
+            .chain(
+                handler_ctxt
+                    .static_scripts
+                    .scripts
+                    .iter()
+                    .map(|s| (Entity::from_raw(0), vec![s.clone()])),
+            )
+            .collect::<Vec<_>>()
+    });
+
+    let entity_and_static_scripts = match entity_and_static_scripts {
+        Ok(entity_and_static_scripts) => entity_and_static_scripts,
+        Err(e) => {
+            bevy::log::error!(
+                "{}: Failed to query entities with scripts: {}",
+                P::LANGUAGE,
+                e.display_with_world(guard.clone())
+            );
+            return;
+        }
+    };
+
+    for event in events.into_iter().filter(|e| e.label == callback_label) {
+        for (entity, entity_scripts) in entity_and_static_scripts.iter() {
             for script_id in entity_scripts.iter() {
                 match &event.recipients {
                     crate::event::Recipients::Script(target_script_id)
@@ -134,119 +189,90 @@ pub(crate) fn event_handler_internal<L: IntoCallbackLabel, P: IntoScriptPluginPa
                     {
                         continue
                     }
-                    _ => (),
+                    _ => {}
                 }
-                let script = match res_ctxt.scripts.scripts.get(script_id) {
-                    Some(s) => s,
-                    None => {
-                        trace_once!(
-                            "{}: Script `{}` on entity `{:?}` is either still loading or doesn't exist, ignoring until the corresponding script is loaded.",
-                            P::LANGUAGE,
-                            script_id, entity
-                        );
-                        continue;
-                    }
-                };
 
-                let ctxt = match res_ctxt
-                    .script_contexts
-                    .contexts
-                    .get_mut(&script.context_id)
-                {
-                    Some(ctxt) => ctxt,
-                    None => {
-                        // if we don't have a context for the script, it's either:
-                        // 1. a script for a different language, in which case we ignore it
-                        // 2. something went wrong. This should not happen though and it's best we ignore this
-                        continue;
-                    }
-                };
-
-                let handler_result = (CallbackSettings::<P>::call)(
-                    res_ctxt.callback_settings.callback_handler,
-                    event.args.clone(),
+                let call_result = handler_ctxt.call_dynamic_label(
+                    &callback_label,
+                    script_id,
                     *entity,
-                    &script.id,
-                    &L::into_callback_label(),
-                    ctxt,
-                    &res_ctxt
-                        .context_loading_settings
-                        .context_pre_handling_initializers,
-                    &mut res_ctxt.runtime_container.runtime,
-                    world,
-                )
-                .map_err(|e| {
-                    e.with_script(script.id.clone())
-                        .with_context(format!("Event handling for: Language: {}", P::LANGUAGE))
-                });
+                    event.args.clone(),
+                    guard.clone(),
+                );
 
-                let _ = push_err_and_continue!(errors, handler_result);
+                match call_result {
+                    Ok(_) => {}
+                    Err(e) => {
+                        match e.downcast_interop_inner() {
+                            Some(InteropErrorInner::MissingScript { script_id }) => {
+                                trace_once!(
+                                "{}: Script `{}` on entity `{:?}` is either still loading, doesn't exist, or is for another language, ignoring until the corresponding script is loaded.",
+                                P::LANGUAGE,
+                                script_id, entity
+                            );
+                                continue;
+                            }
+                            Some(InteropErrorInner::MissingContext { .. }) => {
+                                // if we don't have a context for the script, it's either:
+                                // 1. a script for a different language, in which case we ignore it
+                                // 2. something went wrong. This should not happen though and it's best we ignore this
+                                continue;
+                            }
+                            _ => {}
+                        }
+                        let e = e
+                            .with_script(script_id.clone())
+                            .with_context(format!("Event handling for: Language: {}", P::LANGUAGE));
+                        push_err_and_continue!(errors, Err(e));
+                    }
+                };
             }
         }
     }
 
-    handle_script_errors(world, errors.into_iter());
-}
-
-/// Passes events with the specified label to the script callback with the same name and runs the callback.
-///
-/// If any of the resources required for the handler are missing, the system will log this issue and do nothing.
-#[profiling::function]
-pub fn event_handler<L: IntoCallbackLabel, P: IntoScriptPluginParams>(
-    world: &mut World,
-    params: &mut SystemState<(
-        EventReader<ScriptCallbackEvent>,
-        Query<(Entity, Ref<ScriptComponent>)>,
-    )>,
-) {
-    let mut res_ctxt = match extract_handler_context::<P>(world) {
-        Ok(handler_context) => handler_context,
-        Err(e) => {
-            bevy::log::error_once!(
-                "Event handler for language `{}` will not run due to missing resource: {}",
-                P::LANGUAGE,
-                e
-            );
-            return;
-        }
-    };
-
-    // this ensures the internal handler cannot early return without yielding the context
-    event_handler_internal::<L, P>(world, &mut res_ctxt, params);
-
-    yield_handler_context(world, res_ctxt);
+    handle_script_errors(guard, errors.into_iter());
 }
 
 /// Handles errors caused by script execution and sends them to the error event channel
-pub(crate) fn handle_script_errors<I: Iterator<Item = ScriptError> + Clone>(
-    world: &mut World,
-    errors: I,
-) {
-    let mut error_events = world.get_resource_or_init::<Events<ScriptErrorEvent>>();
+pub fn handle_script_errors<I: Iterator<Item = ScriptError> + Clone>(world: WorldGuard, errors: I) {
+    let err = world.with_resource_mut(|mut error_events: Mut<Events<ScriptErrorEvent>>| {
+        for error in errors.clone() {
+            error_events.send(ScriptErrorEvent { error });
+        }
+    });
 
-    for error in errors.clone() {
-        error_events.send(ScriptErrorEvent { error });
+    if let Err(err) = err {
+        bevy::log::error!(
+            "Failed to send script error events: {}",
+            err.display_with_world(world.clone())
+        );
     }
+
     for error in errors {
-        let arc_world = WorldGuard::new(world);
-        bevy::log::error!("{}", error.display_with_world(arc_world));
+        bevy::log::error!("{}", error.display_with_world(world.clone()));
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::todo)]
 mod test {
-    use std::{borrow::Cow, collections::HashMap};
+    use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
-    use bevy::app::{App, Update};
+    use bevy::{
+        app::{App, Update},
+        asset::AssetPlugin,
+        diagnostic::DiagnosticsPlugin,
+        ecs::world::FromWorld,
+    };
+    use parking_lot::Mutex;
+    use test_utils::make_test_plugin;
 
     use crate::{
         bindings::script_value::ScriptValue,
-        context::{ContextAssigner, ContextBuilder, ContextLoadingSettings, ScriptContexts},
+        context::{ContextBuilder, ContextLoadingSettings},
         event::{CallbackLabel, IntoCallbackLabel, ScriptCallbackEvent, ScriptErrorEvent},
-        handler::HandlerFn,
         runtime::RuntimeContainer,
-        script::{Script, ScriptComponent, ScriptId, Scripts},
+        script::{Script, ScriptComponent, ScriptId, Scripts, StaticScripts},
     };
 
     use super::*;
@@ -258,55 +284,34 @@ mod test {
         }
     }
 
-    struct TestPlugin;
+    make_test_plugin!(crate);
 
-    impl IntoScriptPluginParams for TestPlugin {
-        type C = TestContext;
-        type R = TestRuntime;
-
-        const LANGUAGE: crate::asset::Language = crate::asset::Language::Unknown;
-
-        fn build_runtime() -> Self::R {
-            TestRuntime {
-                invocations: vec![],
-            }
-        }
-    }
-
-    struct TestRuntime {
-        pub invocations: Vec<(Entity, ScriptId)>,
-    }
-
-    struct TestContext {
-        pub invocations: Vec<ScriptValue>,
-    }
-
-    fn setup_app<L: IntoCallbackLabel + 'static, P: IntoScriptPluginParams>(
-        handler_fn: HandlerFn<P>,
-        runtime: P::R,
-        contexts: HashMap<u32, P::C>,
-        scripts: HashMap<ScriptId, Script>,
+    fn setup_app<L: IntoCallbackLabel + 'static>(
+        runtime: TestRuntime,
+        scripts: HashMap<ScriptId, Script<TestPlugin>>,
     ) -> App {
         let mut app = App::new();
 
         app.add_event::<ScriptCallbackEvent>();
         app.add_event::<ScriptErrorEvent>();
-        app.insert_resource::<CallbackSettings<P>>(CallbackSettings {
-            callback_handler: handler_fn,
+        app.insert_resource::<CallbackSettings<TestPlugin>>(CallbackSettings {
+            callback_handler: |args, entity, script, _, ctxt, _, runtime| {
+                ctxt.invocations.extend(args);
+                let mut runtime = runtime.invocations.lock();
+                runtime.push((entity, script.clone()));
+                Ok(ScriptValue::Unit)
+            },
         });
-        app.add_systems(Update, event_handler::<L, P>);
-        app.insert_resource::<Scripts>(Scripts { scripts });
-        app.insert_non_send_resource(RuntimeContainer::<P> { runtime });
-        app.insert_non_send_resource(ScriptContexts::<P> { contexts });
-        app.insert_resource(ContextLoadingSettings::<P> {
+        app.add_systems(Update, event_handler::<L, TestPlugin>);
+        app.insert_resource::<Scripts<TestPlugin>>(Scripts { scripts });
+        app.insert_resource(RuntimeContainer::<TestPlugin> { runtime });
+        app.init_resource::<StaticScripts>();
+        app.insert_resource(ContextLoadingSettings::<TestPlugin> {
             loader: ContextBuilder {
                 load: |_, _, _, _, _| todo!(),
                 reload: |_, _, _, _, _, _| todo!(),
             },
-            assigner: ContextAssigner {
-                assign: |_, _, _| todo!(),
-                remove: |_, _, _| todo!(),
-            },
+            assignment_strategy: Default::default(),
             context_initializers: vec![],
             context_pre_handling_initializers: vec![],
         });
@@ -318,32 +323,16 @@ mod test {
     #[test]
     fn test_handler_called_with_right_args() {
         let test_script_id = Cow::Borrowed("test_script");
-        let test_ctxt_id = 0;
         let test_script = Script {
             id: test_script_id.clone(),
             asset: None,
-            context_id: test_ctxt_id,
+            context: Arc::new(Mutex::new(TestContext::default())),
         };
         let scripts = HashMap::from_iter(vec![(test_script_id.clone(), test_script.clone())]);
-        let contexts = HashMap::from_iter(vec![(
-            test_ctxt_id,
-            TestContext {
-                invocations: vec![],
-            },
-        )]);
         let runtime = TestRuntime {
-            invocations: vec![],
+            invocations: vec![].into(),
         };
-        let mut app = setup_app::<OnTestCallback, TestPlugin>(
-            |args, entity, script, _, ctxt, _, runtime| {
-                ctxt.invocations.extend(args);
-                runtime.invocations.push((entity, script.clone()));
-                Ok(ScriptValue::Unit)
-            },
-            runtime,
-            contexts,
-            scripts,
-        );
+        let mut app = setup_app::<OnTestCallback>(runtime, scripts);
         let test_entity_id = app
             .world_mut()
             .spawn(ScriptComponent(vec![test_script_id.clone()]))
@@ -355,28 +344,29 @@ mod test {
         ));
         app.update();
 
-        let test_context = app
+        let test_script = app
             .world()
-            .get_non_send_resource::<ScriptContexts<TestPlugin>>()
+            .get_resource::<Scripts<TestPlugin>>()
+            .unwrap()
+            .scripts
+            .get(&test_script_id)
             .unwrap();
+
+        let test_context = test_script.context.lock();
+
         let test_runtime = app
             .world()
-            .get_non_send_resource::<RuntimeContainer<TestPlugin>>()
+            .get_resource::<RuntimeContainer<TestPlugin>>()
             .unwrap();
 
         assert_eq!(
-            test_context
-                .contexts
-                .get(&test_ctxt_id)
-                .unwrap()
-                .invocations,
+            test_context.invocations,
             vec![ScriptValue::String("test_args".into())]
         );
 
+        let runtime_invocations = test_runtime.runtime.invocations.lock();
         assert_eq!(
-            test_runtime
-                .runtime
-                .invocations
+            runtime_invocations
                 .iter()
                 .map(|(e, s)| (*e, s.clone()))
                 .collect::<Vec<_>>(),
@@ -387,11 +377,10 @@ mod test {
     #[test]
     fn test_handler_called_on_right_recipients() {
         let test_script_id = Cow::Borrowed("test_script");
-        let test_ctxt_id = 0;
         let test_script = Script {
             id: test_script_id.clone(),
             asset: None,
-            context_id: test_ctxt_id,
+            context: Arc::new(Mutex::new(TestContext::default())),
         };
         let scripts = HashMap::from_iter(vec![
             (test_script_id.clone(), test_script.clone()),
@@ -400,37 +389,15 @@ mod test {
                 Script {
                     id: "wrong".into(),
                     asset: None,
-                    context_id: 1,
+                    context: Arc::new(Mutex::new(TestContext::default())),
                 },
             ),
         ]);
-        let contexts = HashMap::from_iter(vec![
-            (
-                test_ctxt_id,
-                TestContext {
-                    invocations: vec![],
-                },
-            ),
-            (
-                1,
-                TestContext {
-                    invocations: vec![],
-                },
-            ),
-        ]);
+
         let runtime = TestRuntime {
-            invocations: vec![],
+            invocations: vec![].into(),
         };
-        let mut app = setup_app::<OnTestCallback, TestPlugin>(
-            |args, entity, script, _, ctxt, _, runtime| {
-                ctxt.invocations.extend(args);
-                runtime.invocations.push((entity, script.clone()));
-                Ok(ScriptValue::Unit)
-            },
-            runtime,
-            contexts,
-            scripts,
-        );
+        let mut app = setup_app::<OnTestCallback>(runtime, scripts);
         let test_entity_id = app
             .world_mut()
             .spawn(ScriptComponent(vec![test_script_id.clone()]))
@@ -450,21 +417,16 @@ mod test {
 
         app.update();
 
-        let test_context = app
-            .world()
-            .get_non_send_resource::<ScriptContexts<TestPlugin>>()
-            .unwrap();
+        let test_scripts = app.world().get_resource::<Scripts<TestPlugin>>().unwrap();
         let test_runtime = app
             .world()
-            .get_non_send_resource::<RuntimeContainer<TestPlugin>>()
+            .get_resource::<RuntimeContainer<TestPlugin>>()
             .unwrap();
-
+        let test_runtime = test_runtime.runtime.invocations.lock();
+        let script_after = test_scripts.scripts.get(&test_script_id).unwrap();
+        let context_after = script_after.context.lock();
         assert_eq!(
-            test_context
-                .contexts
-                .get(&test_ctxt_id)
-                .unwrap()
-                .invocations,
+            context_after.invocations,
             vec![
                 ScriptValue::String("test_args_script".into()),
                 ScriptValue::String("test_args_entity".into())
@@ -473,8 +435,6 @@ mod test {
 
         assert_eq!(
             test_runtime
-                .runtime
-                .invocations
                 .iter()
                 .map(|(e, s)| (*e, s.clone()))
                 .collect::<Vec<_>>(),
@@ -483,5 +443,84 @@ mod test {
                 (test_entity_id, test_script_id.clone())
             ]
         );
+    }
+
+    #[test]
+    fn test_handler_called_for_static_scripts() {
+        let test_script_id = Cow::Borrowed("test_script");
+
+        let scripts = HashMap::from_iter(vec![(
+            test_script_id.clone(),
+            Script {
+                id: test_script_id.clone(),
+                asset: None,
+                context: Arc::new(Mutex::new(TestContext::default())),
+            },
+        )]);
+        let runtime = TestRuntime {
+            invocations: vec![].into(),
+        };
+        let mut app = setup_app::<OnTestCallback>(runtime, scripts);
+
+        app.world_mut().insert_resource(StaticScripts {
+            scripts: vec![test_script_id.clone()].into_iter().collect(),
+        });
+
+        app.world_mut().send_event(ScriptCallbackEvent::new(
+            OnTestCallback::into_callback_label(),
+            vec![ScriptValue::String("test_args_script".into())],
+            crate::event::Recipients::All,
+        ));
+
+        app.world_mut().send_event(ScriptCallbackEvent::new(
+            OnTestCallback::into_callback_label(),
+            vec![ScriptValue::String("test_script_id".into())],
+            crate::event::Recipients::Script(test_script_id.clone()),
+        ));
+
+        app.update();
+
+        let test_scripts = app.world().get_resource::<Scripts<TestPlugin>>().unwrap();
+        let test_context = test_scripts
+            .scripts
+            .get(&test_script_id)
+            .unwrap()
+            .context
+            .lock();
+
+        assert_eq!(
+            test_context.invocations,
+            vec![
+                ScriptValue::String("test_args_script".into()),
+                ScriptValue::String("test_script_id".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn event_handler_reinserts_resources() {
+        let mut app = App::new();
+        app.add_plugins((
+            AssetPlugin::default(),
+            DiagnosticsPlugin,
+            TestPlugin::default(),
+        ));
+
+        assert!(app
+            .world()
+            .contains_resource::<Events<ScriptCallbackEvent>>());
+
+        let mut local = SystemState::from_world(app.world_mut());
+
+        assert!(app
+            .world()
+            .contains_resource::<Events<ScriptCallbackEvent>>());
+
+        event_handler::<OnTestCallback, TestPlugin>(app.world_mut(), &mut local);
+
+        assert!(app
+            .world()
+            .get_resource::<Events<ScriptCallbackEvent>>()
+            .is_some());
     }
 }

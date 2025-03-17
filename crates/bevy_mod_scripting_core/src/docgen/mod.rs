@@ -1,2 +1,6 @@
 //! Documentation generation for scripting languages.
-pub mod info;
+
+crate::private::export_all_in_modules! {
+    info,
+    typed_through
+}

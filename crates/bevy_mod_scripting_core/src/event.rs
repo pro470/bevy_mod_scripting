@@ -1,7 +1,7 @@
 //! Event handlers and event types for scripting.
 
 use crate::{bindings::script_value::ScriptValue, error::ScriptError, script::ScriptId};
-use bevy::{ecs::entity::Entity, prelude::Event};
+use bevy::{ecs::entity::Entity, prelude::Event, reflect::Reflect};
 
 /// An error coming from a script
 #[derive(Debug, Event)]
@@ -14,7 +14,7 @@ pub struct ScriptErrorEvent {
 /// particularly at the start of the string
 ///
 /// a valid callback label starts with a letter or underscore, and contains only ascii characters, as well as disallows some common keywords
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Reflect, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct CallbackLabel(String);
 
 impl CallbackLabel {
@@ -57,7 +57,7 @@ impl CallbackLabel {
 #[macro_export]
 /// Creates a set of callback labels
 macro_rules! callback_labels {
-    ($($name:ident => $label:expr),*) => {
+    ($($name:ident => $label:expr),* $(,)?) => {
 
         $(
             #[doc = "A callback label for the event: "]
@@ -74,7 +74,7 @@ macro_rules! callback_labels {
 
 callback_labels!(
     OnScriptLoaded => "on_script_loaded",
-    OnScriptUnloaded => "on_script_unloaded"
+    OnScriptUnloaded => "on_script_unloaded",
 );
 
 /// A trait for types that can be converted into a callback label

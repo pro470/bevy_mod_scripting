@@ -14,3 +14,7 @@ Cargo.lock
 assets/scripts/tlconfig.lua
 **.log
 **build/
+.html
+
+/assets/**/*.lad.json
+/docs/src/ladfiles/*.lad.json

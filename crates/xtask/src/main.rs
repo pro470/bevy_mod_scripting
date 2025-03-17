@@ -49,6 +49,10 @@ enum Feature {
     Rhai,
     // Rune
     // Rune,
+
+    // Profiling
+    #[strum(serialize = "bevy/trace_tracy")]
+    Tracy,
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, strum::EnumIter)]
@@ -97,7 +101,8 @@ impl IntoFeatureGroup for Feature {
             Feature::MluaAsync
             | Feature::MluaMacros
             | Feature::MluaSerialize
-            | Feature::UnsafeLuaModules => FeatureGroup::ForExternalCrate,
+            | Feature::UnsafeLuaModules
+            | Feature::Tracy => FeatureGroup::ForExternalCrate,
             Feature::BevyBindings | Feature::CoreFunctions => FeatureGroup::BMSFeature,
             // don't use wildcard here, we want to be explicit
         }
@@ -109,11 +114,12 @@ struct Features(HashSet<Feature>);
 
 impl Default for Features {
     fn default() -> Self {
-        // should be kept up to date with the default feature + lua54
+        // should be kept up to date with the default feature + lua54 on top of anything that is handy to run locally every time
         Features::new(vec![
             Feature::Lua54,
             Feature::CoreFunctions,
             Feature::BevyBindings,
+            Feature::Tracy,
         ])
     }
 }
@@ -196,6 +202,35 @@ impl From<String> for Features {
     }
 }
 
+/// Enumerates the binaries available in the project and their paths
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    strum::EnumString,
+    strum::AsRefStr,
+    strum::VariantNames,
+)]
+#[strum(serialize_all = "snake_case")]
+enum Binary {
+    MdbookPreprocessor,
+}
+
+impl Binary {
+    pub fn path(self) -> PathBuf {
+        PathBuf::from(match self {
+            Binary::MdbookPreprocessor => "./crates/lad_backends/mdbook_lad_preprocessor/",
+        })
+    }
+
+    pub fn to_placeholder() -> clap::builder::Str {
+        format!("[{}]", Binary::VARIANTS.join("|")).into()
+    }
+}
+
 #[derive(
     Debug,
     Clone,
@@ -249,12 +284,20 @@ impl App {
             cmd.arg("--coverage");
         }
 
+        if let Some(jobs) = self.global_args.jobs {
+            cmd.arg("--jobs").arg(jobs.to_string());
+        }
+
         match self.subcmd {
             Xtasks::Macros { macro_name } => {
                 cmd.arg("macros").arg(macro_name.as_ref());
             }
-            Xtasks::Init => {
-                cmd.arg("init");
+            Xtasks::Init { dont_update_ide } => {
+                let arg = cmd.arg("init");
+
+                if dont_update_ide {
+                    arg.arg("--dont-update-ide");
+                }
             }
             Xtasks::Build => {
                 cmd.arg("build");
@@ -300,6 +343,12 @@ impl App {
                     .arg("--bevy-features")
                     .arg(bevy_features.join(","));
             }
+            Xtasks::Example { example } => {
+                cmd.arg("example").arg(example);
+            }
+            Xtasks::Install { binary } => {
+                cmd.arg("install").arg(binary.as_ref());
+            }
         }
 
         cmd
@@ -338,6 +387,7 @@ impl App {
             ),
             os: os.to_string(),
             generates_coverage: self.global_args.coverage,
+            requires_gpu: matches!(self.subcmd, Xtasks::Docs { .. }),
         }
     }
 }
@@ -369,9 +419,24 @@ struct GlobalArgs {
         help = "The cargo profile to use for commands that support it"
     )]
     profile: Option<String>,
+
+    #[clap(
+        long,
+        global = true,
+        value_name = "JOBS",
+        help = "The number of parallel jobs to run at most"
+    )]
+    jobs: Option<usize>,
 }
 
 impl GlobalArgs {
+    pub fn with_max_jobs(self, jobs: usize) -> Self {
+        Self {
+            jobs: Some(jobs),
+            ..self
+        }
+    }
+
     pub fn with_coverage(self) -> Self {
         Self {
             coverage: true,
@@ -480,7 +545,11 @@ enum Xtasks {
         macro_name: Macro,
     },
     /// Performs first time local-development environment setup
-    Init,
+    Init {
+        /// Prevents updating the IDE settings, defaults to false
+        #[clap(long, default_value = "false")]
+        dont_update_ide: bool,
+    },
     /// Build the main workspace only
     Build,
     /// Build the main workspace, apply all prefferred lints
@@ -500,6 +569,20 @@ enum Xtasks {
             help = "The kind of check to perform",
         )]
         kind: CheckKind,
+    },
+    /// Run the example with the given name
+    Example {
+        /// The example to run
+        example: String,
+    },
+    /// Installs a binary produced by the workspace
+    Install {
+        /// The binary to install
+        #[clap(
+            value_parser=clap::value_parser!(Binary),
+            value_name=Binary::to_placeholder(),
+        )]
+        binary: Binary,
     },
     /// Build the rust crates.io docs as well as any other docs
     Docs {
@@ -563,6 +646,8 @@ struct CiMatrixRow {
     os: String,
     /// If this run produces lcov files
     generates_coverage: bool,
+    /// If this step requires a gpu
+    requires_gpu: bool,
 }
 
 impl Xtasks {
@@ -577,7 +662,8 @@ impl Xtasks {
             Xtasks::Docs { open, no_rust_docs } => Self::docs(app_settings, open, no_rust_docs),
             Xtasks::Test { name, package } => Self::test(app_settings, package, name),
             Xtasks::CiCheck => Self::cicd(app_settings),
-            Xtasks::Init => Self::init(app_settings),
+            Xtasks::Init { dont_update_ide } => Self::init(app_settings, dont_update_ide),
+            Xtasks::Example { example } => Self::example(app_settings, example),
             Xtasks::Macros { macro_name } => match macro_name {
                 Macro::ScriptTests => {
                     let mut settings = app_settings.clone();
@@ -622,6 +708,7 @@ impl Xtasks {
                 output_dir,
                 bevy_features,
             } => Self::codegen(app_settings, output_dir, bevy_features),
+            Xtasks::Install { binary } => Self::install(app_settings, binary),
         }?;
 
         Ok("".into())
@@ -725,7 +812,8 @@ impl Xtasks {
 
         args.push(command.to_owned());
 
-        if command != "fmt" && command != "bevy-api-gen" {
+        if command != "fmt" && command != "bevy-api-gen" && command != "run" && command != "install"
+        {
             // fmt doesn't care about features, workspaces or profiles
 
             args.push("--workspace".to_owned());
@@ -742,6 +830,11 @@ impl Xtasks {
                 if !app_settings.coverage {
                     args.push("--profile".to_owned());
                     args.push(use_profile.to_owned());
+                }
+
+                if let Some(jobs) = app_settings.jobs {
+                    args.push("--jobs".to_owned());
+                    args.push(jobs.to_string());
                 }
             }
 
@@ -1031,6 +1124,22 @@ impl Xtasks {
 
     fn docs(mut app_settings: GlobalArgs, open: bool, no_rust_docs: bool) -> Result<()> {
         // find [package.metadata."docs.rs"] key in Cargo.toml
+        info!("installing mdbook ladfile preprocessor binary");
+        Self::install(app_settings.clone(), Binary::MdbookPreprocessor)?;
+
+        info!("Running docgen example to generate ladfiles");
+        Self::example(app_settings.clone(), "docgen".to_owned())?;
+
+        // copy the `<workspace>/assets/bindings.lad.json` file to it's path in the book
+        let ladfile_path = Self::relative_workspace_dir(&app_settings, "assets/bindings.lad.json")?;
+        let destination_path =
+            Self::relative_workspace_dir(&app_settings, "docs/src/ladfiles/bindings.lad.json")?;
+
+        info!("Copying generated ladfile from: {ladfile_path:?} to: {destination_path:?}");
+        std::fs::create_dir_all(destination_path.parent().unwrap())?;
+        std::fs::copy(ladfile_path, destination_path)
+            .with_context(|| "copying generated ladfile")?;
+
         if !no_rust_docs {
             info!("Building rust docs");
             let metadata = Self::main_workspace_cargo_metadata()?;
@@ -1262,7 +1371,11 @@ impl Xtasks {
 
         // and finally run tests with coverage
         output.push(App {
-            global_args: default_args.clone().with_coverage(),
+            global_args: default_args
+                .clone()
+                .with_coverage()
+                // github actions has been throwing a lot of OOM SIGTERM's lately
+                .with_max_jobs(2),
             subcmd: Xtasks::Test {
                 name: None,
                 package: None,
@@ -1284,7 +1397,20 @@ impl Xtasks {
         Ok(())
     }
 
-    fn init(app_settings: GlobalArgs) -> Result<()> {
+    fn init(app_settings: GlobalArgs, dont_update_ide: bool) -> Result<()> {
+        // install alsa et al
+        if cfg!(target_os = "linux") {
+            let sudo = if !is_root::is_root() { "sudo" } else { "" };
+            let install_cmd = format!("{sudo} apt-get update && {sudo} apt-get install --no-install-recommends -y libasound2-dev libudev-dev");
+            Self::run_system_command(
+                &app_settings,
+                "sh",
+                "Failed to install Linux dependencies",
+                vec!["-c", install_cmd.as_str()],
+                None,
+            )?;
+        }
+
         // install cargo mdbook
         Self::run_system_command(
             &app_settings,
@@ -1344,34 +1470,38 @@ impl Xtasks {
 
         // create .vscode settings
         // read from templates at compile time
-        let vscode_settings = include_str!("../templates/settings.json.tera");
-        let mut tera = tera::Tera::default();
-        let mut context = tera::Context::new();
-        let workspace_dir = Self::workspace_dir(&app_settings)?;
-        let json_workspace_dir = serde_json::to_string(&workspace_dir)?; // make sure this works as a json string
-        context.insert("dir", &json_workspace_dir.trim_matches('\"'));
+        if !dont_update_ide {
+            let vscode_settings = include_str!("../templates/settings.json.tera");
+            let mut tera = tera::Tera::default();
+            let mut context = tera::Context::new();
+            let workspace_dir = Self::workspace_dir(&app_settings)?;
+            let json_workspace_dir = serde_json::to_string(&workspace_dir)?; // make sure this works as a json string
+            context.insert("dir", &json_workspace_dir.trim_matches('\"'));
 
-        let templated_settings = tera.render_str(vscode_settings, &context)?;
-        let templated_settings_json = Self::read_json_with_comments(templated_settings.as_bytes())
-            .with_context(|| "reading templated vscode settings")?;
-        let vscode_dir = Self::relative_workspace_dir(&app_settings, ".vscode")?;
-        std::fs::create_dir_all(&vscode_dir)?;
-        let vscode_settings_path = vscode_dir.join("settings.json");
+            let templated_settings = tera.render_str(vscode_settings, &context)?;
+            let templated_settings_json =
+                Self::read_json_with_comments(templated_settings.as_bytes())
+                    .with_context(|| "reading templated vscode settings")?;
+            let vscode_dir = Self::relative_workspace_dir(&app_settings, ".vscode")?;
+            std::fs::create_dir_all(&vscode_dir)?;
+            let vscode_settings_path = vscode_dir.join("settings.json");
 
-        // if the file already exists, merge the settings otherwise create it
-        info!(
-            "Merging vscode settings at {:?}. With overrides generated by template.",
-            vscode_settings_path
-        );
-        if vscode_settings_path.exists() {
-            let existing_settings = std::fs::read_to_string(&vscode_settings_path)?;
-            let mut existing_settings = Self::read_json_with_comments(existing_settings.as_bytes())
-                .with_context(|| "reading existing vscode settings file")?;
-            Self::merge_json(templated_settings_json, &mut existing_settings);
-            let merged_settings = serde_json::to_string_pretty(&existing_settings)?;
-            std::fs::write(&vscode_settings_path, merged_settings)?;
-        } else {
-            std::fs::write(&vscode_settings_path, templated_settings)?;
+            // if the file already exists, merge the settings otherwise create it
+            info!(
+                "Merging vscode settings at {:?}. With overrides generated by template.",
+                vscode_settings_path
+            );
+            if vscode_settings_path.exists() {
+                let existing_settings = std::fs::read_to_string(&vscode_settings_path)?;
+                let mut existing_settings =
+                    Self::read_json_with_comments(existing_settings.as_bytes())
+                        .with_context(|| "reading existing vscode settings file")?;
+                Self::merge_json(templated_settings_json, &mut existing_settings);
+                let merged_settings = serde_json::to_string_pretty(&existing_settings)?;
+                std::fs::write(&vscode_settings_path, merged_settings)?;
+            } else {
+                std::fs::write(&vscode_settings_path, templated_settings)?;
+            }
         }
 
         Ok(())
@@ -1399,6 +1529,44 @@ impl Xtasks {
             warn!("Could not merge json, overrides and target are not objects");
         }
     }
+
+    fn example(app_settings: GlobalArgs, example: String) -> std::result::Result<(), Error> {
+        // find the required features for the example named this in the cargo.toml of the main workspace
+        // the keys look like
+        // [[example]]
+        // name = "docgen"
+        // path = "examples/docgen.rs"
+        // required-features = []
+
+        // let metadata = Self::main_workspace_cargo_metadata()?;
+        // let metadata = &metadata.root_package().unwrap().targets;
+        // println!("{metadata:#?}");
+
+        // run the example
+        Self::run_workspace_command(
+            &app_settings,
+            "run",
+            "Failed to run example",
+            vec!["--example", example.as_str()],
+            None,
+        )?;
+
+        Ok(())
+    }
+
+    fn install(app_settings: GlobalArgs, binary: Binary) -> std::result::Result<(), Error> {
+        // run cargo install --path
+        let binary_path = Self::relative_workspace_dir(&app_settings, binary.path())?;
+        Self::run_system_command(
+            &app_settings,
+            "cargo",
+            "Failed to install binary",
+            vec!["install", "--path", binary_path.to_str().unwrap()],
+            None,
+        )?;
+
+        Ok(())
+    }
 }
 
 /// Because we are likely already runnnig in the context of a cargo invocation,
@@ -1406,8 +1574,11 @@ impl Xtasks {
 /// Set them to MAIN_CARGO_<VARIABLE> so that we can reference them but so they dont get inherited by further cargo commands
 fn pop_cargo_env() -> Result<()> {
     let env = std::env::vars().collect::<Vec<_>>();
+    // RUSTUP TOOLCHAIN exclude is a temporary fix, it might make deving the api codegen crate not work
+    let exclude_list = [];
+
     for (key, value) in env.iter() {
-        if key.starts_with("CARGO_") {
+        if key.starts_with("CARGO_") && !exclude_list.contains(&(key.as_str())) {
             let new_key = format!("MAIN_{}", key);
             std::env::set_var(new_key, value);
             std::env::remove_var(key);
@@ -1417,6 +1588,9 @@ fn pop_cargo_env() -> Result<()> {
     // unset some other variables
     let remove_vars = ["RUSTUP_TOOLCHAIN"];
     for var in remove_vars.iter() {
+        if exclude_list.contains(var) {
+            continue;
+        }
         std::env::remove_var(var);
     }
 

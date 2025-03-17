@@ -6,10 +6,10 @@
 //! we need wrapper types which have owned and ref variants.
 use super::{access_map::ReflectAccessId, WorldGuard};
 use crate::{
-    bindings::ReflectAllocationId,
+    bindings::{with_access_read, with_access_write, ReflectAllocationId},
     error::InteropError,
     reflection_extensions::{PartialReflectExt, TypeIdExtensions},
-    with_access_read, with_access_write, ReflectAllocator,
+    ReflectAllocator,
 };
 use bevy::{
     ecs::{
@@ -25,15 +25,13 @@ use std::{any::TypeId, fmt::Debug};
 /// An accessor to a `dyn PartialReflect` struct, stores a base ID of the type and a reflection path
 /// safe to build but to reflect on the value inside you need to ensure aliasing rules are upheld
 #[derive(Debug, Clone, PartialEq, Eq, Reflect)]
-#[reflect(Default)]
+#[reflect(Default, opaque)]
 pub struct ReflectReference {
-    #[reflect(ignore)]
     /// The base type and id of the value we want to access
     pub base: ReflectBaseType,
     // TODO: experiment with Fixed capacity vec, boxed array etc, compromise between heap allocation and runtime cost
     // needs benchmarks first though
     /// The path from the top level type to the actual value we want to access
-    #[reflect(ignore)]
     pub reflect_path: ParsedPath,
 }
 
@@ -61,6 +59,16 @@ pub enum TypeIdSource {
 }
 #[profiling::all_functions]
 impl ReflectReference {
+    /// If this points to a variant of an enum, returns the name of the variant.
+    pub fn variant_name(&self, world: WorldGuard) -> Result<Option<String>, InteropError> {
+        self.with_reflect(world, |s| {
+            s.reflect_ref()
+                .as_enum()
+                .ok()
+                .map(|enum_ref| enum_ref.variant_name().to_owned())
+        })
+    }
+
     /// Creates a new infinite iterator. This iterator will keep returning the next element reference forever.
     pub fn into_iter_infinite(self) -> ReflectRefIter {
         ReflectRefIter::new_indexed(self)
@@ -233,7 +241,7 @@ impl ReflectReference {
     ) -> Result<O, InteropError> {
         let access_id = ReflectAccessId::for_reference(self.base.base_id.clone());
         with_access_read!(
-            world.0.accesses,
+            &world.inner.accesses,
             access_id,
             "could not access reflect reference",
             { unsafe { self.reflect_unsafe(world.clone()) }.map(f)? }
@@ -250,7 +258,7 @@ impl ReflectReference {
     ) -> Result<O, InteropError> {
         let access_id = ReflectAccessId::for_reference(self.base.base_id.clone());
         with_access_write!(
-            world.0.accesses,
+            &world.inner.accesses,
             access_id,
             "Could not access reflect reference mutably",
             { unsafe { self.reflect_mut_unsafe(world.clone()) }.map(f)? }
@@ -625,7 +633,7 @@ mod test {
             .spawn(Component(vec!["hello".to_owned(), "world".to_owned()]))
             .id();
 
-        let world_guard = WorldGuard::new(&mut world);
+        let world_guard = WorldGuard::new_exclusive(&mut world);
 
         let mut component_ref =
             ReflectReference::new_component_ref::<Component>(entity, world_guard.clone())
@@ -705,7 +713,7 @@ mod test {
 
         world.insert_resource(Resource(vec!["hello".to_owned(), "world".to_owned()]));
 
-        let world_guard = WorldGuard::new(&mut world);
+        let world_guard = WorldGuard::new_exclusive(&mut world);
 
         let mut resource_ref = ReflectReference::new_resource_ref::<Resource>(world_guard.clone())
             .expect("could not create resource reference");
@@ -784,7 +792,7 @@ mod test {
 
         let value = Component(vec!["hello".to_owned(), "world".to_owned()]);
 
-        let world_guard = WorldGuard::new(&mut world);
+        let world_guard = WorldGuard::new_exclusive(&mut world);
         let allocator = world_guard.allocator();
         let mut allocator_write = allocator.write();
         let mut allocation_ref = ReflectReference::new_allocated(value, &mut allocator_write);

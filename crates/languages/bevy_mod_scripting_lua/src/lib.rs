@@ -1,14 +1,13 @@
 //! Lua integration for the bevy_mod_scripting system.
 use bevy::{
     app::Plugin,
-    asset::AssetPath,
     ecs::{entity::Entity, world::World},
 };
 use bevy_mod_scripting_core::{
-    asset::{AssetPathToLanguageMapper, Language},
+    asset::Language,
     bindings::{
-        function::namespace::Namespace, script_value::ScriptValue, ThreadWorldContainer,
-        WorldContainer,
+        function::namespace::Namespace, globals::AppScriptGlobalsRegistry,
+        script_value::ScriptValue, ThreadWorldContainer, WorldContainer,
     },
     context::{ContextBuilder, ContextInitializer, ContextPreHandlingInitializer},
     error::ScriptError,
@@ -53,15 +52,12 @@ impl Default for LuaScriptingPlugin {
     fn default() -> Self {
         LuaScriptingPlugin {
             scripting_plugin: ScriptingPlugin {
-                context_assigner: Default::default(),
+                context_assignment_strategy: Default::default(),
                 runtime_settings: RuntimeSettings::default(),
                 callback_handler: lua_handler,
                 context_builder: ContextBuilder::<LuaScriptingPlugin> {
                     load: lua_context_load,
                     reload: lua_context_reload,
-                },
-                language_mapper: AssetPathToLanguageMapper {
-                    map: lua_language_mapper,
                 },
                 context_initializers: vec![
                     |_script_id, context| {
@@ -73,29 +69,29 @@ impl Default for LuaScriptingPlugin {
                                 LuaStaticReflectReference(std::any::TypeId::of::<World>()),
                             )
                             .map_err(ScriptError::from_mlua_error)?;
+
                         Ok(())
                     },
                     |_script_id, context: &mut Lua| {
                         // set static globals
                         let world = ThreadWorldContainer.try_get_world()?;
-                        let type_registry = world.type_registry();
-                        let type_registry = type_registry.read();
+                        let globals_registry =
+                            world.with_resource(|r: &AppScriptGlobalsRegistry| r.clone())?;
+                        let globals_registry = globals_registry.read();
 
-                        for registration in type_registry.iter() {
-                            // only do this for non generic types
-                            // we don't want to see `Vec<Entity>:function()` in lua
-                            if !registration.type_info().generics().is_empty() {
-                                continue;
-                            }
-
-                            if let Some(global_name) =
-                                registration.type_info().type_path_table().ident()
-                            {
-                                let ref_ = LuaStaticReflectReference(registration.type_id());
-                                context
-                                    .globals()
-                                    .set(global_name, ref_)
-                                    .map_err(ScriptError::from_mlua_error)?;
+                        for (key, global) in globals_registry.iter() {
+                            match &global.maker {
+                                Some(maker) => {
+                                    // non-static global
+                                    let global = (maker)(world.clone())?;
+                                    context
+                                        .globals()
+                                        .set(key.to_string(), LuaScriptValue::from(global))?
+                                }
+                                None => {
+                                    let ref_ = LuaStaticReflectReference(global.type_id);
+                                    context.globals().set(key.to_string(), ref_)?
+                                }
                             }
                         }
 
@@ -134,15 +130,10 @@ impl Default for LuaScriptingPlugin {
                         .map_err(ScriptError::from_mlua_error)?;
                     Ok(())
                 }],
+                additional_supported_extensions: &[],
+                language: Language::Lua,
             },
         }
-    }
-}
-#[profiling::function]
-fn lua_language_mapper(path: &AssetPath) -> Language {
-    match path.path().extension().and_then(|ext| ext.to_str()) {
-        Some("lua") => Language::Lua,
-        _ => Language::Unknown,
     }
 }
 
@@ -150,7 +141,35 @@ impl Plugin for LuaScriptingPlugin {
     fn build(&self, app: &mut bevy::prelude::App) {
         self.scripting_plugin.build(app);
     }
+
+    fn finish(&self, app: &mut bevy::app::App) {
+        self.scripting_plugin.finish(app);
+    }
 }
+
+fn load_lua_content_into_context(
+    context: &mut Lua,
+    script_id: &ScriptId,
+    content: &[u8],
+    initializers: &[ContextInitializer<LuaScriptingPlugin>],
+    pre_handling_initializers: &[ContextPreHandlingInitializer<LuaScriptingPlugin>],
+) -> Result<(), ScriptError> {
+    initializers
+        .iter()
+        .try_for_each(|init| init(script_id, context))?;
+
+    pre_handling_initializers
+        .iter()
+        .try_for_each(|init| init(script_id, Entity::from_raw(0), context))?;
+
+    context
+        .load(content)
+        .exec()
+        .map_err(ScriptError::from_mlua_error)?;
+
+    Ok(())
+}
+
 #[profiling::function]
 /// Load a lua context from a script
 pub fn lua_context_load(
@@ -158,28 +177,23 @@ pub fn lua_context_load(
     content: &[u8],
     initializers: &[ContextInitializer<LuaScriptingPlugin>],
     pre_handling_initializers: &[ContextPreHandlingInitializer<LuaScriptingPlugin>],
-    _: &mut (),
+    _: &(),
 ) -> Result<Lua, ScriptError> {
     #[cfg(feature = "unsafe_lua_modules")]
     let mut context = unsafe { Lua::unsafe_new() };
     #[cfg(not(feature = "unsafe_lua_modules"))]
     let mut context = Lua::new();
 
-    initializers
-        .iter()
-        .try_for_each(|init| init(script_id, &mut context))?;
-
-    pre_handling_initializers
-        .iter()
-        .try_for_each(|init| init(script_id, Entity::from_raw(0), &mut context))?;
-
-    context
-        .load(content)
-        .exec()
-        .map_err(ScriptError::from_mlua_error)?;
-
+    load_lua_content_into_context(
+        &mut context,
+        script_id,
+        content,
+        initializers,
+        pre_handling_initializers,
+    )?;
     Ok(context)
 }
+
 #[profiling::function]
 /// Reload a lua context from a script
 pub fn lua_context_reload(
@@ -188,14 +202,14 @@ pub fn lua_context_reload(
     old_ctxt: &mut Lua,
     initializers: &[ContextInitializer<LuaScriptingPlugin>],
     pre_handling_initializers: &[ContextPreHandlingInitializer<LuaScriptingPlugin>],
-    _: &mut (),
+    _: &(),
 ) -> Result<(), ScriptError> {
-    *old_ctxt = lua_context_load(
+    load_lua_content_into_context(
+        old_ctxt,
         script,
         content,
         initializers,
         pre_handling_initializers,
-        &mut (),
     )?;
     Ok(())
 }
@@ -210,7 +224,7 @@ pub fn lua_handler(
     callback_label: &CallbackLabel,
     context: &mut Lua,
     pre_handling_initializers: &[ContextPreHandlingInitializer<LuaScriptingPlugin>],
-    _: &mut (),
+    _: &(),
 ) -> Result<ScriptValue, bevy_mod_scripting_core::error::ScriptError> {
     pre_handling_initializers
         .iter()
@@ -237,4 +251,50 @@ pub fn lua_handler(
 
     let out = handler.call::<LuaScriptValue>(input)?;
     Ok(out.into())
+}
+
+#[cfg(test)]
+mod test {
+    use mlua::Value;
+
+    use super::*;
+
+    #[test]
+    fn test_reload_doesnt_overwrite_old_context() {
+        let lua = Lua::new();
+        let script_id = ScriptId::from("asd.lua");
+        let initializers = vec![];
+        let pre_handling_initializers = vec![];
+        let mut old_ctxt = lua.clone();
+
+        lua_context_load(
+            &script_id,
+            "function hello_world_from_first_load()
+            
+            end"
+            .as_bytes(),
+            &initializers,
+            &pre_handling_initializers,
+            &(),
+        )
+        .unwrap();
+
+        lua_context_reload(
+            &script_id,
+            "function hello_world_from_second_load()
+            
+            end"
+            .as_bytes(),
+            &mut old_ctxt,
+            &initializers,
+            &pre_handling_initializers,
+            &(),
+        )
+        .unwrap();
+
+        // assert both functions exist in globals
+        let globals = lua.globals();
+        assert!(globals.get::<Value>("hello_world_from_first_load").is_ok());
+        assert!(globals.get::<Value>("hello_world_from_second_load").is_ok());
+    }
 }

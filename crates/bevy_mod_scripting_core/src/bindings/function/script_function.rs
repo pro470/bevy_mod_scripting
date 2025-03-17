@@ -1,6 +1,7 @@
 //! Implementations of the [`ScriptFunction`] and [`ScriptFunctionMut`] traits for functions with up to 13 arguments.
 
 use super::{from::FromScript, into::IntoScript, namespace::Namespace};
+use crate::asset::Language;
 use crate::bindings::function::arg_meta::ArgMeta;
 use crate::docgen::info::{FunctionInfo, GetFunctionInfo};
 use crate::{
@@ -8,10 +9,7 @@ use crate::{
     error::InteropError,
     ScriptValue,
 };
-use bevy::{
-    prelude::{Reflect, Resource},
-    reflect::func::FunctionError,
-};
+use bevy::prelude::{Reflect, Resource};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
@@ -41,23 +39,29 @@ pub trait ScriptFunctionMut<'env, Marker> {
 
 /// The caller context when calling a script function.
 /// Functions can choose to react to caller preferences such as converting 1-indexed numbers to 0-indexed numbers
-#[derive(Clone, Copy, Debug, Reflect, Default)]
+#[derive(Clone, Debug, Reflect)]
 #[reflect(opaque)]
 pub struct FunctionCallContext {
-    /// Whether the caller uses 1-indexing on all indexes and expects 0-indexing conversions to be performed.
-    pub convert_to_0_indexed: bool,
+    language: Language,
 }
 impl FunctionCallContext {
     /// Create a new FunctionCallContext with the given 1-indexing conversion preference
-    pub fn new(convert_to_0_indexed: bool) -> Self {
-        Self {
-            convert_to_0_indexed,
-        }
+    pub const fn new(language: Language) -> Self {
+        Self { language }
     }
 
     /// Tries to access the world, returning an error if the world is not available
     pub fn world<'l>(&self) -> Result<WorldGuard<'l>, InteropError> {
         ThreadWorldContainer.try_get_world()
+    }
+    /// Whether the caller uses 1-indexing on all indexes and expects 0-indexing conversions to be performed.
+    pub fn convert_to_0_indexed(&self) -> bool {
+        matches!(&self.language, Language::Lua)
+    }
+
+    /// Gets the scripting language of the caller
+    pub fn language(&self) -> Language {
+        self.language.clone()
     }
 }
 
@@ -71,12 +75,6 @@ pub struct DynamicScriptFunction {
     func: Arc<
         dyn Fn(FunctionCallContext, VecDeque<ScriptValue>) -> ScriptValue + Send + Sync + 'static,
     >,
-}
-
-impl PartialEq for DynamicScriptFunction {
-    fn eq(&self, other: &Self) -> bool {
-        self.info == other.info
-    }
 }
 
 #[derive(Clone, Reflect)]
@@ -96,12 +94,6 @@ pub struct DynamicScriptFunctionMut {
     >,
 }
 
-impl PartialEq for DynamicScriptFunctionMut {
-    fn eq(&self, other: &Self) -> bool {
-        self.info == other.info
-    }
-}
-
 impl DynamicScriptFunction {
     /// Call the function with the given arguments and caller context.
     ///
@@ -111,7 +103,7 @@ impl DynamicScriptFunction {
         args: I,
         context: FunctionCallContext,
     ) -> Result<ScriptValue, InteropError> {
-        profiling::scope!("Dynamic Call ", self.name().clone());
+        profiling::scope!("Dynamic Call ", self.name().to_string());
         let args = args.into_iter().collect::<VecDeque<_>>();
         // should we be inlining call errors into the return value?
         let return_val = (self.func)(context, args);
@@ -167,7 +159,7 @@ impl DynamicScriptFunctionMut {
         args: I,
         context: FunctionCallContext,
     ) -> Result<ScriptValue, InteropError> {
-        profiling::scope!("Dynamic Call Mut", self.name().clone());
+        profiling::scope!("Dynamic Call Mut", self.name().to_string());
         let args = args.into_iter().collect::<VecDeque<_>>();
         // should we be inlining call errors into the return value?
         let mut write = self.func.write();
@@ -212,6 +204,18 @@ impl DynamicScriptFunctionMut {
             },
             func: self.func,
         }
+    }
+}
+
+impl PartialEq for DynamicScriptFunction {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::addr_eq(self as *const Self, other as *const Self)
+    }
+}
+
+impl PartialEq for DynamicScriptFunctionMut {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::addr_eq(self as *const Self, other as *const Self)
     }
 }
 
@@ -320,47 +324,63 @@ impl ScriptFunctionRegistry {
     ) where
         F: ScriptFunction<'env, M> + GetFunctionInfo<M>,
     {
-        self.register_overload(namespace, name, func, false, None::<&'static str>);
+        self.register_overload(namespace, name, func, false, None::<&'static str>, None);
     }
 
     /// Equivalent to [`ScriptFunctionRegistry::register`] but with the ability to provide documentation for the function.
     ///
     /// The docstring will be added to the function's metadata and can be accessed at runtime.
-    pub fn register_documented<F, M>(
+    pub fn register_documented<'env, F, M>(
         &mut self,
         namespace: Namespace,
         name: impl Into<Cow<'static, str>>,
         func: F,
         docs: &'static str,
     ) where
-        F: ScriptFunction<'static, M> + GetFunctionInfo<M>,
+        F: ScriptFunction<'env, M> + GetFunctionInfo<M>,
     {
-        self.register_overload(namespace, name, func, false, Some(docs));
+        self.register_overload(namespace, name, func, false, Some(docs), None);
+    }
+
+    /// Equivalent to [`ScriptFunctionRegistry::register`] but with the ability to provide argument names for the function as well as documentation.
+    ///
+    /// The argument names and docstring will be added to the function's metadata and can be accessed at runtime.
+    pub fn register_with_arg_names<'env, F, M>(
+        &mut self,
+        namespace: Namespace,
+        name: impl Into<Cow<'static, str>>,
+        func: F,
+        docs: &'static str,
+        arg_names: &'static [&'static str],
+    ) where
+        F: ScriptFunction<'env, M> + GetFunctionInfo<M>,
+    {
+        self.register_overload(namespace, name, func, false, Some(docs), Some(arg_names));
     }
 
     /// Overwrite a function with the given name. If the function does not exist, it will be registered as a new function.
-    pub fn overwrite<F, M>(
+    pub fn overwrite<'env, F, M>(
         &mut self,
         namespace: Namespace,
         name: impl Into<Cow<'static, str>>,
         func: F,
     ) where
-        F: ScriptFunction<'static, M> + GetFunctionInfo<M>,
+        F: ScriptFunction<'env, M> + GetFunctionInfo<M>,
     {
-        self.register_overload(namespace, name, func, true, None::<&'static str>);
+        self.register_overload(namespace, name, func, true, None::<&'static str>, None);
     }
 
     /// Equivalent to [`ScriptFunctionRegistry::overwrite`] but with the ability to provide documentation for the function.
-    pub fn overwrite_documented<F, M>(
+    pub fn overwrite_documented<'env, F, M>(
         &mut self,
         namespace: Namespace,
         name: impl Into<Cow<'static, str>>,
         func: F,
         docs: &'static str,
     ) where
-        F: ScriptFunction<'static, M> + GetFunctionInfo<M>,
+        F: ScriptFunction<'env, M> + GetFunctionInfo<M>,
     {
-        self.register_overload(namespace, name, func, true, Some(docs));
+        self.register_overload(namespace, name, func, true, Some(docs), None);
     }
 
     /// Remove a function from the registry if it exists. Returns the removed function if it was found.
@@ -401,6 +421,7 @@ impl ScriptFunctionRegistry {
         func: F,
         overwrite: bool,
         docs: Option<impl Into<Cow<'static, str>>>,
+        arg_names: Option<&'static [&'static str]>,
     ) where
         F: ScriptFunction<'env, M> + GetFunctionInfo<M>,
     {
@@ -411,6 +432,10 @@ impl ScriptFunctionRegistry {
             let info = func.get_function_info(name.clone(), namespace);
             let info = match docs {
                 Some(docs) => info.with_docs(docs.into()),
+                None => info,
+            };
+            let info = match arg_names {
+                Some(arg_names) => info.with_arg_names(arg_names),
                 None => info,
             };
             let func = func.into_dynamic_script_function().with_info(info);
@@ -512,9 +537,11 @@ impl ScriptFunctionRegistry {
 }
 
 macro_rules! count {
-    () => (0usize);
-    ( $x:tt $($xs:tt)* ) => (1usize + count!($($xs)*));
+        () => (0usize);
+        ( $x:tt $($xs:tt)* ) => (1usize + $crate::bindings::function::script_function::count!($($xs)*));
 }
+
+pub(crate) use count;
 
 macro_rules! impl_script_function {
 
@@ -569,41 +596,41 @@ macro_rules! impl_script_function {
                         let received_args_len = args.len();
                         let expected_arg_count = count!($($param )*);
 
-                        $( let $context = caller_context; )?
+                        $( let $context = caller_context.clone(); )?
                         let world = caller_context.world()?;
-                        world.begin_access_scope()?;
-                        let mut current_arg = 0;
+                        // Safety: we're not holding any references to the world, the arguments which might have aliased will always be dropped
+                        let ret: Result<ScriptValue, InteropError> = unsafe {
+                            world.with_access_scope(||{
+                                let mut current_arg = 0;
 
-                        $(
-                            current_arg += 1;
-                            let $param = args.pop_front();
-                            let $param = match $param {
-                                Some($param) => $param,
-                                None => {
-                                    if let Some(default) = <$param>::default_value() {
-                                        default
-                                    } else {
-                                        return Err(InteropError::function_call_error(FunctionError::ArgCountMismatch{
-                                            expected: expected_arg_count,
-                                            received: received_args_len
-                                        }));
-                                    }
-                                }
-                            };
-                            let $param = <$param>::from_script($param, world.clone())
-                                .map_err(|e| InteropError::function_arg_conversion_error(current_arg.to_string(), e))?;
-                        )*
+                                $(
+                                    current_arg += 1;
+                                    let $param = args.pop_front();
+                                    let $param = match $param {
+                                        Some($param) => $param,
+                                        None => {
+                                            if let Some(default) = <$param>::default_value() {
+                                                default
+                                            } else {
+                                                return Err(InteropError::argument_count_mismatch(expected_arg_count,received_args_len));
+                                            }
+                                        }
+                                    };
+                                    let $param = <$param>::from_script($param, world.clone())
+                                        .map_err(|e| InteropError::function_arg_conversion_error(current_arg.to_string(), e))?;
+                                )*
 
-                        let ret = {
-                            let out = self( $( $context,)?  $( $param.into(), )* );
-                            $(
-                                let $out = out?;
-                                let out = $out;
-                            )?
-                            out.into_script(world.clone()).map_err(|e| InteropError::function_arg_conversion_error("return value".to_owned(), e))
+                                let ret = {
+                                    let out = self( $( $context,)?  $( $param.into(), )* );
+                                    $(
+                                        let $out = out?;
+                                        let out = $out;
+                                    )?
+                                    out.into_script(world.clone()).map_err(|e| InteropError::function_arg_conversion_error("return value".to_owned(), e))
+                                };
+                                ret
+                            })?
                         };
-                        // Safety: we're not holding any references to the world, the arguments which might have aliased have been dropped
-                        unsafe { world.end_access_scope()? };
                         ret
                     })();
                     let script_value: ScriptValue = res.into();
@@ -652,7 +679,10 @@ mod test {
 
         with_local_world(|| {
             let out = script_function
-                .call(vec![ScriptValue::from(1)], FunctionCallContext::default())
+                .call(
+                    vec![ScriptValue::from(1)],
+                    FunctionCallContext::new(Language::Lua),
+                )
                 .unwrap();
 
             assert_eq!(out, ScriptValue::from(1));
@@ -665,8 +695,10 @@ mod test {
         let script_function = fn_.into_dynamic_script_function().with_name("my_fn");
 
         with_local_world(|| {
-            let out =
-                script_function.call(vec![ScriptValue::from(1)], FunctionCallContext::default());
+            let out = script_function.call(
+                vec![ScriptValue::from(1)],
+                FunctionCallContext::new(Language::Lua),
+            );
 
             assert!(out.is_err());
             assert_eq!(
@@ -674,12 +706,30 @@ mod test {
                 InteropError::function_interop_error(
                     "my_fn",
                     Namespace::Global,
-                    InteropError::function_call_error(FunctionError::ArgCountMismatch {
-                        expected: 2,
-                        received: 1
-                    })
+                    InteropError::argument_count_mismatch(2, 1)
                 )
             );
+        });
+    }
+
+    #[test]
+    fn test_interrupted_call_releases_access_scope() {
+        #[derive(bevy::prelude::Component, Reflect)]
+        struct Comp;
+
+        let fn_ = |_a: crate::bindings::function::from::Mut<Comp>| 0usize;
+        let script_function = fn_.into_dynamic_script_function().with_name("my_fn");
+
+        with_local_world(|| {
+            let out = script_function.call(
+                vec![ScriptValue::from(1)],
+                FunctionCallContext::new(Language::Lua),
+            );
+
+            assert!(out.is_err());
+            let world = FunctionCallContext::new(Language::Lua).world().unwrap();
+            // assert no access is held
+            assert!(world.list_accesses().is_empty());
         });
     }
 

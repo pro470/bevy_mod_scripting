@@ -449,6 +449,14 @@ where
                 }
                 Ok(hashmap)
             }
+            ScriptValue::List(list) => {
+                let mut hashmap = std::collections::HashMap::new();
+                for elem in list {
+                    let (key, val) = <(String, V)>::from_script(elem, world.clone())?;
+                    hashmap.insert(key, val);
+                }
+                Ok(hashmap)
+            }
             _ => Err(InteropError::value_mismatch(
                 std::any::TypeId::of::<std::collections::HashMap<String, V>>(),
                 value,
@@ -456,3 +464,106 @@ where
         }
     }
 }
+
+/// A union of two or more (by nesting unions) types.
+pub struct Union<T1, T2>(Result<T1, T2>);
+
+impl<T1, T2> Union<T1, T2> {
+    /// Create a new union with the left value.
+    pub fn new_left(value: T1) -> Self {
+        Union(Ok(value))
+    }
+
+    /// Create a new union with the right value.
+    pub fn new_right(value: T2) -> Self {
+        Union(Err(value))
+    }
+
+
+    /// Try interpret the union as the left type
+    pub fn into_left(self) -> Result<T1, T2> {
+        match self.0 {
+            Ok(r) => Ok(r),
+            Err(l) => Err(l),
+        }
+    }
+
+    /// Try interpret the union as the right type
+    pub fn into_right(self) -> Result<T2, T1> {
+        match self.0 {
+            Err(r) => Ok(r),
+            Ok(l) => Err(l),
+        }
+    }
+     
+    /// Map the union to another type
+    pub fn map_both<U1, U2, F: Fn(T1) -> U1, G: Fn(T2) -> U2>(self, f: F, g: G) -> Union<U1, U2> {
+        match self.0 {
+            Ok(t) => Union(Ok(f(t))),
+            Err(t) => Union(Err(g(t))),
+        }
+    }
+}
+
+impl<T1: FromScript, T2: FromScript> FromScript for Union<T1, T2>
+where
+    for<'a> T1::This<'a>: Into<T1>,
+    for<'a> T2::This<'a>: Into<T2>,
+{
+    type This<'w> = Self;
+    fn from_script(
+        value: ScriptValue,
+        world: WorldGuard<'_>,
+    ) -> Result<Self::This<'_>, InteropError> {
+        let _ = match T1::from_script(value.clone(), world.clone()) {
+            Ok(v) => return Ok(Union(Ok(v.into()))),
+            Err(e) => e,
+        };
+
+        match T2::from_script(value, world) {
+            Ok(v) => Ok(Union(Err(v.into()))),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+macro_rules! impl_from_script_tuple {
+    ($($ty:ident),*) => {
+        #[allow(non_snake_case)]
+        impl<$($ty: FromScript),*> FromScript for ($($ty,)*)
+        where
+            Self: 'static,
+            $(
+                for<'w> $ty::This<'w>: Into<$ty>,
+            )*
+        {
+            type This<'w> = Self;
+
+            fn from_script(value: ScriptValue, world: WorldGuard<'_>) -> Result<Self, InteropError> {
+                match value {
+                    ScriptValue::List(list) => {
+                        let expected_arg_count = $crate::bindings::function::script_function::count!( $($ty)* );
+                        if list.len() != expected_arg_count {
+                            return Err(InteropError::length_mismatch(expected_arg_count, list.len()));
+                        }
+
+                        let mut iter = list.into_iter();
+                        $(
+                            let next_item = iter.next().ok_or_else(|| InteropError::invariant("list has right amount of elements"))?;
+                            let $ty = $ty::from_script(next_item, world.clone())?.into();
+                        )*
+
+
+                        Ok(($($ty,)*))
+                    }
+                    _ => Err(InteropError::value_mismatch(
+                        std::any::TypeId::of::<Self>(),
+                        value,
+                    )),
+                }
+            }
+        }
+    };
+}
+
+bevy::utils::all_tuples!(impl_from_script_tuple, 1, 14, T);

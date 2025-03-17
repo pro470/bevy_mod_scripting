@@ -2,7 +2,7 @@
 
 use crate::reflection_extensions::{FakeType, TypeIdExtensions};
 
-use super::{
+use crate::bindings::{
     access_map::ReflectAccessId, script_value::ScriptValue, ReflectAllocationId, ReflectBase,
     ReflectBaseType, ReflectReference, WorldGuard,
 };
@@ -12,7 +12,10 @@ use bevy::{
     reflect::{PartialReflect, ReflectRef},
 };
 use itertools::Itertools;
-use std::{any::TypeId, borrow::Cow};
+use std::{
+    any::{Any, TypeId},
+    borrow::Cow,
+};
 
 /// A utility for printing reflect references in a human readable format.
 pub struct ReflectReferencePrinter {
@@ -310,15 +313,10 @@ impl ReflectReferencePrinter {
             ReflectRef::Opaque(o) => {
                 self.pretty_print_value_opaque(o, output);
             }
-            ReflectRef::Function(f) => {
-                output.push_str("Function(");
-                output.push_str(
-                    f.info()
-                        .name()
-                        .unwrap_or(&Cow::Borrowed("<unnamed function>"))
-                        .as_ref(),
-                );
-                output.push(')');
+            // for function_reflection from bevy or other feature gated things
+            #[allow(unreachable_patterns)]
+            _ => {
+                output.push_str(&format!("{:?}", v));
             }
         }
     }
@@ -330,7 +328,7 @@ impl ReflectReferencePrinter {
 
 /// For types which can't be pretty printed without world access.
 /// Implementors should try to print the best value they can, and never panick.
-pub trait DisplayWithWorld: std::fmt::Debug {
+pub trait DisplayWithWorld: std::fmt::Debug + AsAny {
     /// # Warning
     /// Display this type without world access. It is not recommended to use this method for anything other than debugging or necessary trait impl corners.
     /// For many types this will just print type id's with no further information.
@@ -348,6 +346,27 @@ pub trait DisplayWithWorld: std::fmt::Debug {
         self.display_with_world(world)
     }
 }
+
+#[doc(hidden)]
+pub trait AsAny: 'static {
+    fn as_any(&self) -> &dyn Any;
+}
+
+#[doc(hidden)]
+impl<T: DisplayWithWorld + 'static> AsAny for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl dyn DisplayWithWorld {
+    /// Downcasts the `DisplayWithWorld` trait object to a concrete type.
+    /// Trampoline function to allow downcasting of errors.
+    pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
+        self.as_any().downcast_ref::<T>()
+    }
+}
+
 #[profiling::all_functions]
 impl DisplayWithWorld for ReflectReference {
     fn display_with_world(&self, world: WorldGuard) -> String {
@@ -529,7 +548,7 @@ impl DisplayWithWorld for ScriptValue {
     }
 }
 #[profiling::all_functions]
-impl<T: DisplayWithWorld> DisplayWithWorld for Vec<T> {
+impl<T: DisplayWithWorld + 'static> DisplayWithWorld for Vec<T> {
     fn display_with_world(&self, world: WorldGuard) -> String {
         let mut string = String::new();
         BracketType::Square.surrounded(&mut string, |string| {
@@ -584,7 +603,7 @@ impl DisplayWithWorld for String {
     }
 }
 #[profiling::all_functions]
-impl<K: DisplayWithWorld, V: DisplayWithWorld> DisplayWithWorld
+impl<K: DisplayWithWorld + 'static, V: DisplayWithWorld + 'static> DisplayWithWorld
     for std::collections::HashMap<K, V>
 {
     fn display_with_world(&self, world: WorldGuard) -> String {
@@ -662,7 +681,7 @@ mod test {
     #[test]
     fn test_type_id() {
         let mut world = setup_world();
-        let world = WorldGuard::new(&mut world);
+        let world = WorldGuard::new_exclusive(&mut world);
 
         let type_id = TypeId::of::<usize>();
         assert_eq!(type_id.display_with_world(world.clone()), "usize");
@@ -681,7 +700,7 @@ mod test {
     #[test]
     fn test_reflect_base_type() {
         let mut world = setup_world();
-        let world = WorldGuard::new(&mut world);
+        let world = WorldGuard::new_exclusive(&mut world);
 
         let type_id = TypeId::of::<usize>();
 
@@ -717,7 +736,7 @@ mod test {
     fn test_reflect_reference() {
         let mut world = setup_world();
 
-        let world = WorldGuard::new(&mut world);
+        let world = WorldGuard::new_exclusive(&mut world);
 
         let type_id = TypeId::of::<usize>();
 
@@ -750,7 +769,7 @@ mod test {
     #[test]
     fn test_hashmap() {
         let mut world = setup_world();
-        let world = WorldGuard::new(&mut world);
+        let world = WorldGuard::new_exclusive(&mut world);
 
         let mut map = std::collections::HashMap::new();
         map.insert("hello".to_owned(), ScriptValue::Bool(true));

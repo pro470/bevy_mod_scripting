@@ -1,29 +1,80 @@
 //! Abstractions to do with dynamic script functions
 
-pub mod arg_meta;
-pub mod from;
-pub mod from_ref;
-pub mod into;
-pub mod into_ref;
-pub mod namespace;
-pub mod script_function;
-pub mod type_dependencies;
+crate::private::export_all_in_modules!{
+    arg_meta,
+    from,
+    from_ref,
+    into,
+    into_ref,
+    namespace,
+    script_function,
+    type_dependencies
+}
 
 #[cfg(test)]
 #[allow(dead_code)]
 mod test {
-    use bevy::reflect::{FromReflect, GetTypeRegistration, Typed};
+    use bevy::reflect::{FromReflect, GetTypeRegistration, Reflect, Typed};
+    use bevy_mod_scripting_derive::script_bindings;
 
-    use crate::{
-        bindings::function::from::{Ref, Val},
-        error::InteropError,
-    };
+    use crate::bindings::{
+            function::{
+                from::{Ref, Union, Val},
+                namespace::IntoNamespace,
+                script_function::AppScriptFunctionRegistry,
+            }, script_value::ScriptValue
+        };
 
-    use super::arg_meta::{ScriptArgument, ScriptReturn};
+    use super::arg_meta::{ScriptArgument, ScriptReturn, TypedScriptArgument, TypedScriptReturn};
 
-    fn test_is_valid_return<T: ScriptReturn>() {}
-    fn test_is_valid_arg<T: ScriptArgument>() {}
-    fn test_is_valid_arg_and_return<T: ScriptArgument + ScriptReturn>() {}
+    #[test]
+    fn test_macro_generates_correct_registrator_function() {
+        #[derive(Reflect)]
+        struct TestStruct;
+
+        #[script_bindings(bms_core_path = "crate", name = "test_fn")]
+        impl TestStruct {
+            /// My docs !!
+            fn test_fn(_self: Ref<TestStruct>, mut _arg1: usize) {}
+        }
+
+        let mut test_world = bevy::ecs::world::World::default();
+
+        register_test_fn(&mut test_world);
+
+        let app_registry = test_world
+            .get_resource::<AppScriptFunctionRegistry>()
+            .unwrap();
+        let app_registry = app_registry.read();
+
+        let test_fn = app_registry
+            .get_function(TestStruct::into_namespace(), "test_fn")
+            .unwrap();
+
+        assert_eq!(test_fn.info.docs, Some("My docs !!".into()));
+        assert_eq!(test_fn.info.arg_info.len(), 2);
+
+        assert_eq!(
+            test_fn.info.arg_info[0].type_id,
+            std::any::TypeId::of::<Ref<TestStruct>>()
+        );
+        assert_eq!(test_fn.info.arg_info[0].name, Some("_self".into()));
+
+        assert_eq!(
+            test_fn.info.arg_info[1].type_id,
+            std::any::TypeId::of::<usize>()
+        );
+        assert_eq!(test_fn.info.arg_info[1].name, Some("_arg1".into()));
+
+        assert_eq!(
+            test_fn.info.return_info.type_id,
+            std::any::TypeId::of::<()>()
+        );
+    }
+
+    fn test_is_valid_return<T: TypedScriptReturn>() {}
+    fn test_is_valid_arg<T: TypedScriptArgument>() {}
+    fn test_is_valid_arg_and_return<T: TypedScriptReturn + TypedScriptArgument>() {}
 
     #[test]
     fn primitives_are_valid_args() {
@@ -42,6 +93,7 @@ mod test {
         test_is_valid_arg_and_return::<f64>();
         test_is_valid_arg_and_return::<usize>();
         test_is_valid_arg_and_return::<isize>();
+        test_is_valid_arg_and_return::<ScriptValue>();
     }
 
     #[test]
@@ -50,14 +102,17 @@ mod test {
         test_is_valid_arg_and_return::<std::path::PathBuf>();
         test_is_valid_arg_and_return::<std::ffi::OsString>();
         test_is_valid_arg_and_return::<char>();
+        test_is_valid_return::<&'static str>();
     }
 
     #[test]
     fn composites_are_valid_args() {
+        test_is_valid_arg::<Union<usize, usize>>();
+
         fn test_val<T>()
         where
             T: ScriptArgument + ScriptReturn,
-            T: GetTypeRegistration + FromReflect,
+            T: GetTypeRegistration + FromReflect + Typed,
         {
             test_is_valid_arg_and_return::<Val<T>>();
         }
@@ -78,12 +133,20 @@ mod test {
             test_is_valid_arg::<Ref<'_, T>>();
         }
 
-        test_is_valid_return::<InteropError>();
+        fn test_union<T>()
+        where
+            T: TypedScriptArgument + TypedScriptReturn,
+            T::Underlying: FromReflect + Typed + GetTypeRegistration,
+            for<'a> T::This<'a>: Into<T>,
+        {
+            test_is_valid_arg_and_return::<Union<T, T>>();
+            test_is_valid_arg_and_return::<Union<T, Union<T, T>>>();
+        }
 
         fn test_array<T, const N: usize>()
         where
-            T: ScriptArgument + ScriptReturn,
-            T: GetTypeRegistration + FromReflect + Typed,
+            T: TypedScriptArgument + TypedScriptReturn + 'static,
+            T::Underlying: FromReflect + Typed + GetTypeRegistration,
             for<'a> T::This<'a>: Into<T>,
         {
             test_is_valid_arg_and_return::<[T; N]>();
@@ -91,20 +154,20 @@ mod test {
 
         fn test_tuple<T>()
         where
-            T: ScriptArgument + ScriptReturn,
-            T: GetTypeRegistration + FromReflect + Typed,
+            T: TypedScriptArgument + TypedScriptReturn + 'static,
+            T::Underlying: FromReflect + Typed + GetTypeRegistration,
             for<'a> T::This<'a>: Into<T>,
         {
             test_is_valid_arg_and_return::<()>();
-            test_is_valid_return::<(T,)>();
-            test_is_valid_return::<(T, T)>();
-            test_is_valid_return::<(T, T, T, T, T, T, T, T, T, T)>();
+            test_is_valid_arg_and_return::<(T,)>();
+            test_is_valid_arg_and_return::<(T, T)>();
+            test_is_valid_arg_and_return::<(T, T, T, T, T, T, T, T, T, T)>();
         }
 
         fn test_option<T>()
         where
-            T: ScriptArgument + ScriptReturn,
-            T: GetTypeRegistration + FromReflect + Typed,
+            T: TypedScriptArgument + TypedScriptReturn,
+            T::Underlying: FromReflect + Typed + GetTypeRegistration,
             for<'a> T::This<'a>: Into<T>,
         {
             test_is_valid_arg_and_return::<Option<T>>();
@@ -112,8 +175,8 @@ mod test {
 
         fn test_vec<T>()
         where
-            T: ScriptArgument + ScriptReturn,
-            T: GetTypeRegistration + FromReflect + Typed,
+            T: TypedScriptArgument + TypedScriptReturn + 'static,
+            T::Underlying: FromReflect + Typed + GetTypeRegistration,
             for<'a> T::This<'a>: Into<T>,
         {
             test_is_valid_arg_and_return::<Vec<T>>();
@@ -121,8 +184,8 @@ mod test {
 
         fn test_hashmap<V>()
         where
-            V: ScriptArgument + ScriptReturn,
-            V: GetTypeRegistration + FromReflect + Typed,
+            V: TypedScriptArgument + TypedScriptReturn + 'static,
+            V::Underlying: FromReflect + Typed + GetTypeRegistration + Eq,
             for<'a> V::This<'a>: Into<V>,
         {
             test_is_valid_arg_and_return::<std::collections::HashMap<String, V>>();
