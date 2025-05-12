@@ -20,3 +20,4 @@ Static type references, existing for the purpose of typed static function calls\
 | Instance | Type |
 | --- | --- |
 | `my_static_instance` | StructType\<[usize](./types/usize.md)\> |
+

@@ -9,7 +9,7 @@ use std::{
     ffi::{OsStr, OsString},
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
     str::FromStr,
 };
 use strum::{IntoEnumIterator, VariantNames};
@@ -31,6 +31,17 @@ use strum::{IntoEnumIterator, VariantNames};
 )]
 #[strum(serialize_all = "snake_case")]
 enum Feature {
+    // bindings
+    CoreFunctions,
+    BevyCoreBindings,
+    BevyEcsBindings,
+    BevyHierarchyBindings,
+    BevyInputBindings,
+    BevyMathBindings,
+    BevyReflectBindings,
+    BevyTimeBindings,
+    BevyTransformBindings,
+
     // Lua
     Lua51,
     Lua52,
@@ -39,8 +50,6 @@ enum Feature {
     Luajit,
     Luajit52,
     Luau,
-    BevyBindings,
-    CoreFunctions,
     UnsafeLuaModules,
     MluaSerialize,
     MluaMacros,
@@ -51,8 +60,7 @@ enum Feature {
     // Rune,
 
     // Profiling
-    #[strum(serialize = "bevy/trace_tracy")]
-    Tracy,
+    ProfileWithTracy,
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, strum::EnumIter)]
@@ -62,6 +70,7 @@ enum FeatureGroup {
     // RuneExclusive,
     ForExternalCrate,
     BMSFeature,
+    BMSFeatureNotInPowerset,
 }
 
 impl FeatureGroup {
@@ -101,10 +110,16 @@ impl IntoFeatureGroup for Feature {
             Feature::MluaAsync
             | Feature::MluaMacros
             | Feature::MluaSerialize
-            | Feature::UnsafeLuaModules
-            | Feature::Tracy => FeatureGroup::ForExternalCrate,
-            Feature::BevyBindings | Feature::CoreFunctions => FeatureGroup::BMSFeature,
-            // don't use wildcard here, we want to be explicit
+            | Feature::UnsafeLuaModules => FeatureGroup::ForExternalCrate,
+            Feature::BevyCoreBindings
+            | Feature::BevyEcsBindings
+            | Feature::BevyHierarchyBindings
+            | Feature::BevyInputBindings
+            | Feature::BevyMathBindings
+            | Feature::BevyReflectBindings
+            | Feature::BevyTimeBindings
+            | Feature::BevyTransformBindings => FeatureGroup::BMSFeatureNotInPowerset,
+            Feature::CoreFunctions | Feature::ProfileWithTracy => FeatureGroup::BMSFeature, // don't use wildcard here, we want to be explicit
         }
     }
 }
@@ -118,8 +133,14 @@ impl Default for Features {
         Features::new(vec![
             Feature::Lua54,
             Feature::CoreFunctions,
-            Feature::BevyBindings,
-            Feature::Tracy,
+            Feature::BevyCoreBindings,
+            Feature::BevyEcsBindings,
+            Feature::BevyHierarchyBindings,
+            Feature::BevyInputBindings,
+            Feature::BevyMathBindings,
+            Feature::BevyReflectBindings,
+            Feature::BevyTimeBindings,
+            Feature::BevyTransformBindings,
         ])
     }
 }
@@ -142,6 +163,33 @@ impl Features {
                 .cloned()
                 .collect(),
         )
+    }
+
+    fn display_no_default(self) -> String {
+        let default_features = Self::default().0;
+
+        let excluded_default_features = default_features
+            .difference(&self.0)
+            .map(|f| format!("-{f}"))
+            .collect::<Vec<_>>();
+
+        let mut features = self
+            .0
+            .into_iter()
+            .filter(|f| !default_features.contains(f))
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>();
+
+        features.sort();
+        excluded_default_features
+            .into_iter()
+            .chain(features)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn without(self, feature: Feature) -> Self {
+        Self(self.0.into_iter().filter(|f| *f != feature).collect())
     }
 
     fn to_cargo_args(&self) -> Vec<String> {
@@ -172,6 +220,7 @@ impl Features {
 
 impl std::fmt::Display for Features {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // exclude default features
         for (i, feature) in self.0.iter().sorted().enumerate() {
             if i > 0 {
                 write!(f, ",")?;
@@ -349,6 +398,27 @@ impl App {
             Xtasks::Install { binary } => {
                 cmd.arg("install").arg(binary.as_ref());
             }
+            Xtasks::Bencher { publish } => {
+                cmd.arg("bencher");
+
+                if publish {
+                    cmd.arg("--publish");
+                }
+            }
+            Xtasks::Bench {
+                name,
+                enable_profiling: profile,
+            } => {
+                cmd.arg("bench");
+
+                if let Some(name) = name {
+                    cmd.arg("--name").arg(name);
+                }
+
+                if profile {
+                    cmd.arg("--profile");
+                }
+            }
         }
 
         cmd
@@ -382,7 +452,7 @@ impl App {
                 if self.global_args.features == Features::all_features() {
                     "all features".to_owned()
                 } else {
-                    self.global_args.features.to_string()
+                    self.global_args.features.display_no_default()
                 }
             ),
             os: os.to_string(),
@@ -634,6 +704,22 @@ enum Xtasks {
     /// ]
     ///
     CiMatrix,
+    /// Runs bencher in dry mode by default if not on the main branch
+    /// To publish main branch defaults set publish mode to true
+    Bencher {
+        /// Publish the benchmarks when on main
+        #[clap(long, default_value = "false", help = "Publish the benchmarks")]
+        publish: bool,
+    },
+    /// Runs criterion benchmarks generates json required to be published by bencher and generates html performance report
+    Bench {
+        /// Whether or not to enable tracy profiling
+        #[clap(long, default_value = "false", help = "Enable tracy profiling")]
+        enable_profiling: bool,
+        /// The name argument passed to `cargo bench`, can be used in combination with profile to selectively profile benchmarks
+        #[clap(long, help = "The name argument passed to `cargo bench`")]
+        name: Option<String>,
+    },
 }
 
 #[derive(Serialize, Clone)]
@@ -709,6 +795,14 @@ impl Xtasks {
                 bevy_features,
             } => Self::codegen(app_settings, output_dir, bevy_features),
             Xtasks::Install { binary } => Self::install(app_settings, binary),
+            Xtasks::Bencher { publish } => Self::bencher(app_settings, publish),
+            Xtasks::Bench {
+                name,
+                enable_profiling,
+            } => {
+                let _ = Self::bench(app_settings, enable_profiling, name, false)?;
+                Ok(())
+            }
         }?;
 
         Ok("".into())
@@ -796,7 +890,8 @@ impl Xtasks {
         context: &str,
         add_args: I,
         dir: Option<&Path>,
-    ) -> Result<()> {
+        capture_streams_in_output: bool,
+    ) -> Result<Output> {
         let coverage_mode = app_settings
             .coverage
             .then_some("with coverage")
@@ -812,29 +907,29 @@ impl Xtasks {
 
         args.push(command.to_owned());
 
-        if command != "fmt" && command != "bevy-api-gen" && command != "run" && command != "install"
-        {
+        if command != "fmt" && command != "bevy-api-gen" && command != "install" {
             // fmt doesn't care about features, workspaces or profiles
+            if command != "run" {
+                args.push("--workspace".to_owned());
 
-            args.push("--workspace".to_owned());
+                if let Some(profile) = app_settings.profile.as_ref() {
+                    let use_profile = if profile == "ephemeral-build" && app_settings.coverage {
+                        // use special profile for coverage as it needs debug information
+                        // but also don't want it too slow
+                        "ephemeral-coverage"
+                    } else {
+                        profile
+                    };
 
-            if let Some(profile) = app_settings.profile.as_ref() {
-                let use_profile = if profile == "ephemeral-build" && app_settings.coverage {
-                    // use special profile for coverage as it needs debug information
-                    // but also don't want it too slow
-                    "ephemeral-coverage"
-                } else {
-                    profile
-                };
+                    if !app_settings.coverage {
+                        args.push("--profile".to_owned());
+                        args.push(use_profile.to_owned());
+                    }
 
-                if !app_settings.coverage {
-                    args.push("--profile".to_owned());
-                    args.push(use_profile.to_owned());
-                }
-
-                if let Some(jobs) = app_settings.jobs {
-                    args.push("--jobs".to_owned());
-                    args.push(jobs.to_string());
+                    if let Some(jobs) = app_settings.jobs {
+                        args.push("--jobs".to_owned());
+                        args.push(jobs.to_string());
+                    }
                 }
             }
 
@@ -854,18 +949,20 @@ impl Xtasks {
         };
 
         let mut cmd = Command::new("cargo");
-        cmd.args(args)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .current_dir(working_dir);
+        cmd.args(args).current_dir(working_dir);
+
+        if !capture_streams_in_output {
+            cmd.stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit());
+        }
 
         info!("Using command: {:?}", cmd);
 
         let output = cmd.output().with_context(|| context.to_owned())?;
         match output.status.code() {
-            Some(0) => Ok(()),
+            Some(0) => Ok(output),
             _ => bail!(
-                "{} failed with exit code: {}. Features: {}",
+                "{} failed with exit code: {}. Features: {}. output {output:?}",
                 context,
                 output.status.code().unwrap_or(-1),
                 app_settings.features
@@ -881,6 +978,7 @@ impl Xtasks {
             "Failed to build workspace",
             vec!["--all-targets"],
             None,
+            false,
         )?;
         Ok(())
     }
@@ -899,6 +997,7 @@ impl Xtasks {
             "Failed to run clippy",
             clippy_args,
             None,
+            false,
         )?;
 
         if ide_mode {
@@ -912,6 +1011,7 @@ impl Xtasks {
             "Failed to run cargo fmt",
             vec!["--all", "--", "--check"],
             None,
+            false,
         )?;
 
         Ok(())
@@ -939,6 +1039,7 @@ impl Xtasks {
             "Failed to run clippy on codegen crate",
             clippy_args,
             None,
+            false,
         )?;
 
         // TODO: for now do nothing, it's difficult to get rust analyzer to accept the nightly version
@@ -1080,6 +1181,7 @@ impl Xtasks {
                 "-v",
             ],
             Some(&bevy_dir),
+            false,
         )?;
 
         // collect
@@ -1098,6 +1200,7 @@ impl Xtasks {
                 "-v",
             ],
             Some(&bevy_dir),
+            false,
         )?;
 
         Ok(())
@@ -1190,6 +1293,7 @@ impl Xtasks {
                 "Failed to build crates.io docs",
                 args,
                 None,
+                false,
             )?;
         }
 
@@ -1204,6 +1308,277 @@ impl Xtasks {
             args,
             Some(Path::new("docs")),
         )?;
+
+        Ok(())
+    }
+
+    fn bench(
+        app_settings: GlobalArgs,
+        profile: bool,
+        name: Option<String>,
+        capture_streams_in_output: bool,
+    ) -> Result<Output> {
+        log::info!("Profiling enabled: {profile}");
+
+        let mut features = Features::default();
+
+        if profile {
+            std::env::set_var("ENABLE_PROFILING", "1");
+            // features.push(Feature::BevyTracy);
+            features.0.insert(Feature::ProfileWithTracy);
+        } else {
+            std::env::set_var("RUST_LOG", "bevy_mod_scripting=error");
+        }
+
+        let args = if let Some(name) = name {
+            vec!["--".to_owned(), name]
+        } else {
+            vec![]
+        };
+
+        let output = Self::run_workspace_command(
+            // run with just lua54
+            &app_settings.with_features(features),
+            "bench",
+            "Failed to run benchmarks",
+            args,
+            None,
+            capture_streams_in_output,
+        )
+        .with_context(|| "when executing criterion benchmarks")?;
+
+        Ok(output)
+    }
+
+    fn bencher(app_settings: GlobalArgs, publish: bool) -> Result<()> {
+        // // first of all figure out which branch we're on
+        // // run // git rev-parse --abbrev-ref HEAD
+        let workspace_dir = Self::workspace_dir(&app_settings).unwrap();
+        let command = Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(workspace_dir.clone())
+            .output()
+            .with_context(|| "Trying to figure out which branch we're on in benchmarking")?;
+        let branch = String::from_utf8(command.stdout)?.trim().replace("\n", "");
+
+        let is_main = branch.trim() == "main";
+
+        // figure out if we're running in github actions
+        let github_token = std::env::var("GITHUB_TOKEN").ok();
+
+        // get testbed
+        // we want this to be a combination of
+        // is_github_ci?
+        // OS
+        // machine id
+
+        let os = std::env::consts::OS;
+
+        let testbed = format!(
+            "{os}{}",
+            github_token.is_some().then_some("-gha").unwrap_or_default()
+        );
+
+        // also figure out if we're on a fork
+
+        let token = std::env::var("BENCHER_API_TOKEN").ok();
+
+        // first of all run bench, and save output to a file
+
+        let result = Self::bench(app_settings, false, None, true)?;
+        let bench_file_path = PathBuf::from("./bencher_output.txt");
+        let mut file = std::fs::File::create(&bench_file_path)?;
+        file.write_all(&result.stdout)?;
+
+        let mut bencher_cmd = Command::new("bencher");
+        bencher_cmd
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .arg("run")
+            .args(["--project", "bms"])
+            .args(["--branch", &branch])
+            .args(["--token", &token.unwrap_or_default()])
+            .args(["--testbed", &testbed])
+            // .args(["--build-time"])
+            .args(["--threshold-measure", "latency"])
+            .args(["--threshold-test", "t_test"])
+            .args(["--threshold-max-sample-size", "64"])
+            .args(["--threshold-upper-boundary", "0.99"])
+            .args(["--thresholds-reset"]);
+
+        if let Some(token) = &github_token {
+            bencher_cmd.args(["--github-actions", token]);
+        }
+
+        if !is_main || !publish {
+            bencher_cmd.args(["--dry-run"]);
+        }
+
+        bencher_cmd
+            .args(["--adapter", "rust_criterion"])
+            .arg("--file")
+            .arg(bench_file_path);
+
+        log::info!("Running bencher command: {:?}", bencher_cmd);
+
+        let out = bencher_cmd
+            .output()
+            .with_context(|| "Could not trigger bencher command")?;
+        if !out.status.success() {
+            bail!("Failed to run bencher: {:?}", out);
+        }
+
+        // if we're on linux and publishing and on main synch graphs
+        if os == "linux" && is_main && publish && github_token.is_some() {
+            Self::synch_bencher_graphs()?;
+        }
+
+        Ok(())
+    }
+
+    fn synch_bencher_graphs() -> Result<()> {
+        // first run `bencher benchmark list bms
+        // this produces list of objects each containing a `uuid` and `name`
+
+        let parse_list_of_dicts = |bytes: Vec<u8>| {
+            if bytes.is_empty() {
+                bail!("Empty input");
+            }
+            serde_json::from_slice::<Vec<HashMap<String, serde_json::Value>>>(&bytes)
+                .map(|map| {
+                    map.into_iter()
+                        .map(|map| {
+                            map.into_iter()
+                                .map(|(k, v)| (k, v.as_str().unwrap_or_default().to_string()))
+                                .collect::<HashMap<_, _>>()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .with_context(|| "Could not parse bencher output")
+        };
+
+        let token = std::env::var("BENCHER_API_TOKEN").ok();
+        let mut bencher_cmd = Command::new("bencher");
+        let benchmarks = bencher_cmd
+            .stdout(std::process::Stdio::piped())
+            .arg("benchmark")
+            .args(["list", "bms"])
+            .args(["--per-page", "255"])
+            .args(["--token", &token.clone().unwrap_or_default()])
+            .output()
+            .with_context(|| "Could not list benchmarks")?;
+        if !benchmarks.status.success() {
+            bail!("Failed to list benchmarks: {:?}", benchmarks);
+        }
+
+        // parse teh name and uuid pairs
+        let benchmarks = parse_list_of_dicts(benchmarks.stdout)
+            .with_context(|| "Reading benchmarks")?
+            .into_iter()
+            .map(|p| {
+                let name = p.get("name").expect("no name in project");
+                let uuid = p.get("uuid").expect("no uuid in project");
+                (name.clone(), uuid.clone())
+            })
+            .collect::<Vec<_>>();
+
+        // delete all plots using bencher plot list bms to get "uuid's"
+        // then bencher plot delete bms <uuid>
+
+        let bencher_cmd = Command::new("bencher")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .args(["plot", "list", "bms"])
+            .args(["--per-page", "255"])
+            .args(["--token", &token.clone().unwrap_or_default()])
+            .output()
+            .with_context(|| "Could not list plots")?;
+
+        if !bencher_cmd.status.success() {
+            bail!("Failed to list plots: {:?}", bencher_cmd);
+        }
+
+        let plots = parse_list_of_dicts(bencher_cmd.stdout)
+            .with_context(|| "reading plots")?
+            .into_iter()
+            .map(|p| {
+                log::info!("Plot to delete: {:?}", p);
+                let uuid = p.get("uuid").expect("no uuid in plot");
+                uuid.clone()
+            })
+            .collect::<Vec<_>>();
+
+        for uuid in plots {
+            let bencher_cmd = Command::new("bencher")
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .args(["plot", "delete", "bms", &uuid])
+                .args(["--token", &token.clone().unwrap_or_default()])
+                .output()
+                .with_context(|| "Could not delete plot")?;
+
+            if !bencher_cmd.status.success() {
+                bail!("Failed to delete plot: {:?}", bencher_cmd);
+            }
+        }
+
+        const MAIN_BRANCH_UUID: &str = "1d70a4e3-d416-43fc-91bd-4b1c8f9e9580";
+        const LATENCY_MEASURE_UUID: &str = "6820b034-5163-4cdd-95f5-5640dd0ff298";
+        const LINUX_GHA_TESTBED: &str = "467e8580-a67a-435e-a602-b167541f332c";
+        const MACOS_GHA_TESTBAD: &str = "f8aab940-27d2-4b52-93df-4518fe68abfb";
+        const WINDOWS_GHA_TESTBED: &str = "be8ff546-31d3-40c4-aacc-763e5e8a09c4";
+
+        let testbeds = [
+            ("linux-gha", LINUX_GHA_TESTBED),
+            ("macos-gha", MACOS_GHA_TESTBAD),
+            ("windows-gha", WINDOWS_GHA_TESTBED),
+        ];
+
+        let group_to_benchmark_map: HashMap<_, Vec<_>> =
+            benchmarks
+                .iter()
+                .fold(HashMap::new(), |mut acc, (name, uuid)| {
+                    let group = name.split('/').next().unwrap_or_default();
+                    acc.entry(group.to_owned()).or_default().push(uuid.clone());
+                    acc
+                });
+
+        // create plot using
+        // bencher plot create --x-axis date_time --branches main --testbeds <uuids> --benchmarks <uuids> --measures latency
+
+        for (group, uuids) in group_to_benchmark_map.iter().sorted() {
+            for (testbed_name, testbed_uuid) in testbeds.iter() {
+                let without_gha = testbed_name.replace("-gha", "");
+                let plot_name = format!("{without_gha} {group}");
+
+                let window_months = 12;
+                let window_seconds = window_months * 30 * 24 * 60 * 60;
+                let mut bencher_cmd = Command::new("bencher");
+                bencher_cmd
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit())
+                    .args(["plot", "create", "bms"])
+                    .args(["--title", &plot_name])
+                    .args(["--x-axis", "version"])
+                    .args(["--window", &window_seconds.to_string()])
+                    .args(["--branches", MAIN_BRANCH_UUID])
+                    .args(["--testbeds", testbed_uuid])
+                    .args(["--measures", LATENCY_MEASURE_UUID])
+                    .args(["--token", &token.clone().unwrap_or_default()]);
+
+                for benchmark_uuid in uuids {
+                    bencher_cmd.arg("--benchmarks").arg(benchmark_uuid);
+                }
+
+                let bencher_cmd = bencher_cmd
+                    .output()
+                    .with_context(|| "Could not create plot")?;
+
+                if !bencher_cmd.status.success() {
+                    bail!("Failed to create plot: {:?}", bencher_cmd);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -1242,6 +1617,7 @@ impl Xtasks {
             "Failed to run tests",
             test_args,
             None,
+            false,
         )?;
 
         // generate coverage report and lcov file
@@ -1324,7 +1700,7 @@ impl Xtasks {
 
         let default_args = app_settings
             .clone()
-            .with_features(Features::all_features())
+            .with_features(Features::all_features().without(Feature::ProfileWithTracy))
             .with_profile(
                 app_settings
                     .profile
@@ -1343,6 +1719,12 @@ impl Xtasks {
                 feature_set.0.extend(f.iter().cloned());
             }
 
+            // include all features which are excluded from powersetting
+            if let Some(f) = grouped.get(&FeatureGroup::BMSFeatureNotInPowerset) {
+                feature_set.0.extend(f.iter().cloned());
+            }
+
+            // replace args with powerset
             output.push(App {
                 global_args: default_args.clone().with_features(feature_set.clone()),
                 subcmd: Xtasks::Build,
@@ -1367,6 +1749,13 @@ impl Xtasks {
                 open: false,
                 no_rust_docs: false,
             },
+        });
+
+        // also run a benchmark
+        // on non-main branches this will just dry run
+        output.push(App {
+            global_args: default_args.clone(),
+            subcmd: Xtasks::Bencher { publish: true },
         });
 
         // and finally run tests with coverage
@@ -1411,6 +1800,25 @@ impl Xtasks {
             )?;
         }
 
+        // install bencher
+        // linux curl --proto '=https' --tlsv1.2 -sSfL https://bencher.dev/download/install-cli.sh | sh
+        // windows irm https://bencher.dev/download/install-cli.ps1 | iex
+        Self::run_system_command(
+            &app_settings,
+            "cargo",
+            "Failed to install bencher",
+            vec![
+                "install",
+                "--git",
+                "https://github.com/bencherdev/bencher",
+                "--branch",
+                "main",
+                "--locked",
+                "--force",
+                "bencher_cli",
+            ],
+            None,
+        )?;
         // install cargo mdbook
         Self::run_system_command(
             &app_settings,
@@ -1549,6 +1957,7 @@ impl Xtasks {
             "Failed to run example",
             vec!["--example", example.as_str()],
             None,
+            false,
         )?;
 
         Ok(())

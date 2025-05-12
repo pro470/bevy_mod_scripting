@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/makspll/bevy_mod_scripting/compare/v0.1.6-mdbook_lad_preprocessor...v0.1.7-mdbook_lad_preprocessor) - 2025-04-07
+
+### Added
+
+- improve errors when entity is unavailable ([#410](https://github.com/makspll/bevy_mod_scripting/pull/410))
+
+### Fixed
+
+- links in type functions ([#412](https://github.com/makspll/bevy_mod_scripting/pull/412))
+
+## [0.1.6](https://github.com/makspll/bevy_mod_scripting/compare/v0.1.5-mdbook_lad_preprocessor...v0.1.6-mdbook_lad_preprocessor) - 2025-03-29
+
+### Fixed
+
+- types links being broken again
+
+## [0.1.5](https://github.com/makspll/bevy_mod_scripting/compare/v0.1.4-mdbook_lad_preprocessor...v0.1.5-mdbook_lad_preprocessor) - 2025-03-29
+
+### Added
+
+- overhaul mdbook preprocessor, prettify generated docs, support dummy globals ([#377](https://github.com/makspll/bevy_mod_scripting/pull/377))
+
+### Fixed
+
+- make all links in the mdbook preprocessor relative ([#392](https://github.com/makspll/bevy_mod_scripting/pull/392))
+- mdbook preprocessor links not taking into account root url ([#391](https://github.com/makspll/bevy_mod_scripting/pull/391))
+
 ## [0.1.4](https://github.com/makspll/bevy_mod_scripting/compare/v0.1.3-mdbook_lad_preprocessor...v0.1.4-mdbook_lad_preprocessor) - 2025-03-16
 
 ### Added

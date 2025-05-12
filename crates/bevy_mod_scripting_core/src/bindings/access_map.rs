@@ -1,5 +1,6 @@
 //! A map of access claims used to safely and dynamically access the world.
-use std::thread::ThreadId;
+
+use std::hash::{BuildHasherDefault, Hasher};
 
 use bevy::{
     ecs::{component::ComponentId, world::unsafe_world_cell::UnsafeWorldCell},
@@ -16,7 +17,6 @@ use super::{ReflectAllocationId, ReflectBase};
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// An owner of an access claim and the code location of the claim.
 pub struct ClaimOwner {
-    id: ThreadId,
     location: std::panic::Location<'static>,
 }
 
@@ -35,6 +35,7 @@ impl Default for AccessCount {
     }
 }
 
+#[profiling::all_functions]
 impl AccessCount {
     fn new() -> Self {
         Self {
@@ -71,6 +72,7 @@ pub trait AccessMapKey {
     fn from_index(value: u64) -> Self;
 }
 
+#[profiling::all_functions]
 impl AccessMapKey for u64 {
     fn as_index(&self) -> u64 {
         *self
@@ -100,6 +102,7 @@ pub struct ReflectAccessId {
     pub(crate) id: u64,
 }
 
+#[profiling::all_functions]
 impl AccessMapKey for ReflectAccessId {
     fn as_index(&self) -> u64 {
         // project two linear non-negative ranges [0,inf] to a single linear non-negative range, offset by 1 to avoid 0
@@ -134,6 +137,7 @@ impl AccessMapKey for ReflectAccessId {
     }
 }
 
+#[profiling::all_functions]
 impl ReflectAccessId {
     /// Creates a new access id for the global world
     pub fn for_global() -> Self {
@@ -192,6 +196,7 @@ impl ReflectAccessId {
     }
 }
 
+#[profiling::all_functions]
 impl From<ComponentId> for ReflectAccessId {
     fn from(value: ComponentId) -> Self {
         Self {
@@ -201,6 +206,7 @@ impl From<ComponentId> for ReflectAccessId {
     }
 }
 
+#[profiling::all_functions]
 impl From<ReflectAllocationId> for ReflectAccessId {
     fn from(value: ReflectAllocationId) -> Self {
         Self {
@@ -210,12 +216,14 @@ impl From<ReflectAllocationId> for ReflectAccessId {
     }
 }
 
+#[profiling::all_functions]
 impl From<ReflectAccessId> for ComponentId {
     fn from(val: ReflectAccessId) -> Self {
         ComponentId::new(val.id as usize)
     }
 }
 
+#[profiling::all_functions]
 impl From<ReflectAccessId> for ReflectAllocationId {
     fn from(val: ReflectAccessId) -> Self {
         ReflectAllocationId::new(val.id)
@@ -309,10 +317,58 @@ pub trait DynamicSystemMeta {
     fn access_first_location(&self) -> Option<std::panic::Location<'static>>;
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Default)]
+/// A hash function which doesn't do much. for maps which expect very small hashes.
+/// Assumes only needs to hash u64 values, unsafe otherwise
+struct SmallIdentityHash(u64);
+impl Hasher for SmallIdentityHash {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // concat all bytes via &&
+        // this is a bit of a hack, but it works for our use case
+        // and is faster than using a hash function
+        #[allow(clippy::expect_used, reason = "cannot handle this panic otherwise")]
+        let arr: &[u8; 8] = bytes.try_into().expect("this hasher only supports u64");
+        // depending on endianess
+
+        #[cfg(target_endian = "big")]
+        let word = u64::from_be_bytes(*arr);
+        #[cfg(target_endian = "little")]
+        let word = u64::from_le_bytes(*arr);
+        self.0 = word
+    }
+}
+
+#[derive(Default, Debug, Clone)]
 struct AccessMapInner {
-    individual_accesses: HashMap<u64, AccessCount>,
+    individual_accesses: HashMap<u64, AccessCount, BuildHasherDefault<SmallIdentityHash>>,
     global_lock: AccessCount,
+}
+
+#[profiling::all_functions]
+impl AccessMapInner {
+    #[inline]
+    fn entry(&self, key: u64) -> Option<&AccessCount> {
+        self.individual_accesses.get(&key)
+    }
+
+    #[inline]
+    fn entry_mut(&mut self, key: u64) -> Option<&mut AccessCount> {
+        self.individual_accesses.get_mut(&key)
+    }
+
+    #[inline]
+    fn entry_or_default(&mut self, key: u64) -> &mut AccessCount {
+        self.individual_accesses.entry(key).or_default()
+    }
+
+    #[inline]
+    fn remove(&mut self, key: u64) {
+        self.individual_accesses.remove(&key);
+    }
 }
 
 const GLOBAL_KEY: u64 = 0;
@@ -362,10 +418,10 @@ impl DynamicSystemMeta for AccessMap {
             return false;
         }
 
-        let entry = inner.individual_accesses.entry(key).or_default();
+        let entry = inner.entry_or_default(key);
+
         if entry.can_read() {
             entry.read_by.push(ClaimOwner {
-                id: std::thread::current().id(),
                 location: *std::panic::Location::caller(),
             });
             true
@@ -388,10 +444,10 @@ impl DynamicSystemMeta for AccessMap {
             return false;
         }
 
-        let entry = inner.individual_accesses.entry(key).or_default();
+        let entry = inner.entry_or_default(key);
+
         if entry.can_write() {
             entry.read_by.push(ClaimOwner {
-                id: std::thread::current().id(),
                 location: *std::panic::Location::caller(),
             });
             entry.written = true;
@@ -409,7 +465,6 @@ impl DynamicSystemMeta for AccessMap {
             return false;
         }
         inner.global_lock.read_by.push(ClaimOwner {
-            id: std::thread::current().id(),
             location: *std::panic::Location::caller(),
         });
         inner.global_lock.written = true;
@@ -420,31 +475,19 @@ impl DynamicSystemMeta for AccessMap {
         let mut inner = self.0.lock();
         let key = key.as_index();
 
-        if let Some(entry) = inner.individual_accesses.get_mut(&key) {
+        if let Some(entry) = inner.entry_mut(key) {
             entry.written = false;
-            if let Some(claim) = entry.read_by.pop() {
-                assert!(
-                    claim.id == std::thread::current().id(),
-                    "Access released from wrong thread, claimed at {}",
-                    claim.location.display_location()
-                );
-            }
+            entry.read_by.pop();
             if entry.readers() == 0 {
-                inner.individual_accesses.remove(&key);
+                inner.remove(key);
             }
         }
     }
 
     fn release_global_access(&self) {
         let mut inner = self.0.lock();
+        inner.global_lock.read_by.pop();
         inner.global_lock.written = false;
-        if let Some(claim) = inner.global_lock.read_by.pop() {
-            assert!(
-                claim.id == std::thread::current().id(),
-                "Global access released from wrong thread, claimed at {}",
-                claim.location.display_location()
-            );
-        }
     }
 
     fn list_accesses<K: AccessMapKey>(&self) -> Vec<(K, AccessCount)> {
@@ -452,7 +495,7 @@ impl DynamicSystemMeta for AccessMap {
         inner
             .individual_accesses
             .iter()
-            .map(|(&key, count)| (K::from_index(key), count.clone()))
+            .map(|(key, a)| (K::from_index(*key), a.clone()))
             .collect()
     }
 
@@ -486,8 +529,7 @@ impl DynamicSystemMeta for AccessMap {
             })
         } else {
             inner
-                .individual_accesses
-                .get(&key.as_index())
+                .entry(key.as_index())
                 .and_then(|access| access.as_location())
         }
     }
@@ -496,8 +538,9 @@ impl DynamicSystemMeta for AccessMap {
         let inner = self.0.lock();
         inner
             .individual_accesses
-            .values()
-            .find_map(|access| access.as_location())
+            .iter()
+            .next()
+            .and_then(|(_, access)| access.as_location())
     }
 }
 
@@ -507,6 +550,7 @@ pub struct SubsetAccessMap {
     subset: Box<dyn Fn(u64) -> bool + Send + Sync + 'static>,
 }
 
+#[profiling::all_functions]
 impl SubsetAccessMap {
     /// Creates a new subset access map with the provided subset of ID's as well as a exception function.
     pub fn new(
@@ -528,6 +572,7 @@ impl SubsetAccessMap {
     }
 }
 
+#[profiling::all_functions]
 impl DynamicSystemMeta for SubsetAccessMap {
     fn with_scope<O, F: FnOnce() -> O>(&self, f: F) -> O {
         self.inner.with_scope(f)
@@ -601,6 +646,7 @@ pub enum AnyAccessMap {
     SubsetAccessMap(SubsetAccessMap),
 }
 
+#[profiling::all_functions]
 impl DynamicSystemMeta for AnyAccessMap {
     fn with_scope<O, F: FnOnce() -> O>(&self, f: F) -> O {
         match self {
@@ -700,12 +746,14 @@ pub trait DisplayCodeLocation {
     fn display_location(self) -> String;
 }
 
+#[profiling::all_functions]
 impl DisplayCodeLocation for std::panic::Location<'_> {
     fn display_location(self) -> String {
         format!("\"{}:{}\"", self.file(), self.line())
     }
 }
 
+#[profiling::all_functions]
 impl DisplayCodeLocation for Option<std::panic::Location<'_>> {
     fn display_location(self) -> String {
         self.map(|l| l.display_location())
@@ -774,6 +822,8 @@ pub(crate) use with_global_access;
 
 #[cfg(test)]
 mod test {
+    use std::hash::Hash;
+
     use super::*;
 
     #[test]
@@ -924,66 +974,6 @@ mod test {
 
         assert!(subset_access_map.claim_write_access(1));
         assert!(!subset_access_map.claim_global_access());
-    }
-
-    #[test]
-    #[should_panic]
-    fn access_map_releasing_read_access_from_wrong_thread_panics() {
-        let access_map = AccessMap::default();
-
-        access_map.claim_read_access(1);
-        std::thread::spawn(move || {
-            access_map.release_access(1);
-        })
-        .join()
-        .unwrap();
-    }
-
-    #[test]
-    #[should_panic]
-    fn subset_map_releasing_read_access_from_wrong_thread_panics() {
-        let access_map = AccessMap::default();
-        let subset_access_map = SubsetAccessMap {
-            inner: access_map,
-            subset: Box::new(|id| id == 1),
-        };
-
-        subset_access_map.claim_read_access(1);
-        std::thread::spawn(move || {
-            subset_access_map.release_access(1);
-        })
-        .join()
-        .unwrap();
-    }
-
-    #[test]
-    #[should_panic]
-    fn access_map_releasing_write_access_from_wrong_thread_panics() {
-        let access_map = AccessMap::default();
-
-        access_map.claim_write_access(1);
-        std::thread::spawn(move || {
-            access_map.release_access(1);
-        })
-        .join()
-        .unwrap();
-    }
-
-    #[test]
-    #[should_panic]
-    fn subset_map_releasing_write_access_from_wrong_thread_panics() {
-        let access_map = AccessMap::default();
-        let subset_access_map = SubsetAccessMap {
-            inner: access_map,
-            subset: Box::new(|id| id == 1),
-        };
-
-        subset_access_map.claim_write_access(1);
-        std::thread::spawn(move || {
-            subset_access_map.release_access(1);
-        })
-        .join()
-        .unwrap();
     }
 
     #[test]
@@ -1238,5 +1228,13 @@ mod test {
         assert!(subset_access_map.claim_read_access(1));
         assert!(!subset_access_map.claim_read_access(2));
         assert!(!subset_access_map.claim_write_access(2));
+    }
+
+    #[test]
+    fn test_hasher_on_u64() {
+        let mut hasher = SmallIdentityHash::default();
+        let value = 42u64;
+        value.hash(&mut hasher);
+        assert_eq!(hasher.finish(), 42);
     }
 }

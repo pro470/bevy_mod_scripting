@@ -34,6 +34,7 @@ impl Default for FunctionInfo {
     }
 }
 
+#[profiling::all_functions]
 impl FunctionInfo {
     /// Create a new function info with default values.
     pub fn new() -> Self {
@@ -55,6 +56,18 @@ impl FunctionInfo {
             return_info: FunctionReturnInfo::default(),
             docs: None,
         }
+    }
+
+    /// Set the name of the function info.
+    pub fn with_name(mut self, name: impl Into<Cow<'static, str>>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    /// Set the namespace of the function info.
+    pub fn with_namespace(mut self, namespace: Namespace) -> Self {
+        self.namespace = namespace;
+        self
     }
 
     /// Add an argument to the function info.
@@ -108,6 +121,7 @@ pub struct FunctionArgInfo {
     pub type_info: Option<ThroughTypeInfo>,
 }
 
+#[profiling::all_functions]
 impl FunctionArgInfo {
     /// Create a new function argument info with a name.
     pub fn with_name(mut self, name: Cow<'static, str>) -> Self {
@@ -145,6 +159,7 @@ impl Default for FunctionReturnInfo {
     }
 }
 
+#[profiling::all_functions]
 impl FunctionReturnInfo {
     /// Create a new function return info for a specific type.
     pub fn new_for<T: TypedThrough + 'static>() -> Self {
@@ -157,6 +172,7 @@ impl FunctionReturnInfo {
 
 macro_rules! impl_documentable {
     ($( $param:ident ),*) => {
+        #[profiling::all_functions]
         impl<$($param,)* F, O> GetFunctionInfo<fn($($param),*) -> O> for F
             where
             F: Fn($($param),*) -> O,

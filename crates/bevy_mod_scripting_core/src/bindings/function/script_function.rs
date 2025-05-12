@@ -1,5 +1,6 @@
 //! Implementations of the [`ScriptFunction`] and [`ScriptFunctionMut`] traits for functions with up to 13 arguments.
 
+use super::MagicFunctions;
 use super::{from::FromScript, into::IntoScript, namespace::Namespace};
 use crate::asset::Language;
 use crate::bindings::function::arg_meta::ArgMeta;
@@ -10,13 +11,13 @@ use crate::{
     ScriptValue,
 };
 use bevy::prelude::{Reflect, Resource};
+use bevy::utils::hashbrown::HashMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-
 #[diagnostic::on_unimplemented(
     message = "This function does not fulfil the requirements to be a script callable function. All arguments must implement the ScriptArgument trait and all return values must implement the ScriptReturn trait",
     note = "If you're trying to return a non-primitive type, you might need to use Val<T> Ref<T> or Mut<T> wrappers"
@@ -44,6 +45,7 @@ pub trait ScriptFunctionMut<'env, Marker> {
 pub struct FunctionCallContext {
     language: Language,
 }
+
 impl FunctionCallContext {
     /// Create a new FunctionCallContext with the given 1-indexing conversion preference
     pub const fn new(language: Language) -> Self {
@@ -51,38 +53,41 @@ impl FunctionCallContext {
     }
 
     /// Tries to access the world, returning an error if the world is not available
+    #[profiling::function]
     pub fn world<'l>(&self) -> Result<WorldGuard<'l>, InteropError> {
         ThreadWorldContainer.try_get_world()
     }
     /// Whether the caller uses 1-indexing on all indexes and expects 0-indexing conversions to be performed.
+    #[profiling::function]
     pub fn convert_to_0_indexed(&self) -> bool {
         matches!(&self.language, Language::Lua)
     }
 
     /// Gets the scripting language of the caller
+    #[profiling::function]
     pub fn language(&self) -> Language {
         self.language.clone()
     }
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Reflect, Clone)]
 #[reflect(opaque)]
 /// A dynamic script function.
 pub struct DynamicScriptFunction {
     /// The meta information about the function
-    pub info: FunctionInfo,
+    pub info: Arc<FunctionInfo>,
     // TODO: info about the function, this is hard right now because of non 'static lifetimes in wrappers, we can't use TypePath etc
     func: Arc<
         dyn Fn(FunctionCallContext, VecDeque<ScriptValue>) -> ScriptValue + Send + Sync + 'static,
     >,
 }
 
-#[derive(Clone, Reflect)]
+#[derive(Reflect, Clone)]
 #[reflect(opaque)]
 /// A dynamic mutable script function.
 pub struct DynamicScriptFunctionMut {
     /// The meta information about the function
-    pub info: FunctionInfo,
+    pub info: Arc<FunctionInfo>,
     func: Arc<
         RwLock<
             // I'd rather consume an option or something instead of having the RWLock but I just wanna get this release out
@@ -94,6 +99,7 @@ pub struct DynamicScriptFunctionMut {
     >,
 }
 
+#[profiling::all_functions]
 impl DynamicScriptFunction {
     /// Call the function with the given arguments and caller context.
     ///
@@ -103,7 +109,7 @@ impl DynamicScriptFunction {
         args: I,
         context: FunctionCallContext,
     ) -> Result<ScriptValue, InteropError> {
-        profiling::scope!("Dynamic Call ", self.name().to_string());
+        profiling::scope!("Dynamic Call ", self.name().deref());
         let args = args.into_iter().collect::<VecDeque<_>>();
         // should we be inlining call errors into the return value?
         let return_val = (self.func)(context, args);
@@ -123,33 +129,13 @@ impl DynamicScriptFunction {
     }
 
     /// Set the meta information about the function
-    pub fn with_info(self, info: FunctionInfo) -> Self {
-        Self { info, ..self }
-    }
-
-    /// Set the name of the function
-    pub fn with_name<N: Into<Cow<'static, str>>>(self, name: N) -> Self {
-        Self {
-            info: FunctionInfo {
-                name: name.into(),
-                ..self.info
-            },
-            func: self.func,
-        }
-    }
-
-    /// Set the namespace of the function
-    pub fn with_namespace(self, namespace: Namespace) -> Self {
-        Self {
-            info: FunctionInfo {
-                namespace,
-                ..self.info
-            },
-            func: self.func,
-        }
+    pub fn with_info(mut self, info: FunctionInfo) -> Self {
+        self.info = Arc::new(info);
+        self
     }
 }
 
+#[profiling::all_functions]
 impl DynamicScriptFunctionMut {
     /// Call the function with the given arguments and caller context.
     ///
@@ -159,7 +145,7 @@ impl DynamicScriptFunctionMut {
         args: I,
         context: FunctionCallContext,
     ) -> Result<ScriptValue, InteropError> {
-        profiling::scope!("Dynamic Call Mut", self.name().to_string());
+        profiling::scope!("Dynamic Call Mut", self.name().deref());
         let args = args.into_iter().collect::<VecDeque<_>>();
         // should we be inlining call errors into the return value?
         let mut write = self.func.write();
@@ -180,30 +166,9 @@ impl DynamicScriptFunctionMut {
     }
 
     /// Set the meta information about the function
-    pub fn with_info(self, info: FunctionInfo) -> Self {
-        Self { info, ..self }
-    }
-
-    /// Set the name of the function
-    pub fn with_name<N: Into<Cow<'static, str>>>(self, name: N) -> Self {
-        Self {
-            info: FunctionInfo {
-                name: name.into(),
-                ..self.info
-            },
-            func: self.func,
-        }
-    }
-
-    /// Set the namespace of the function
-    pub fn with_namespace(self, namespace: Namespace) -> Self {
-        Self {
-            info: FunctionInfo {
-                namespace,
-                ..self.info
-            },
-            func: self.func,
-        }
+    pub fn with_info(mut self, info: FunctionInfo) -> Self {
+        self.info = Arc::new(info);
+        self
     }
 }
 
@@ -241,10 +206,11 @@ where
 {
     fn from(fn_: F) -> Self {
         DynamicScriptFunction {
-            info: FunctionInfo::default(),
+            info: FunctionInfo::default()
+                .with_name(std::any::type_name::<F>())
+                .into(),
             func: Arc::new(fn_),
         }
-        .with_name(std::any::type_name::<F>())
     }
 }
 
@@ -254,10 +220,11 @@ where
 {
     fn from(fn_: F) -> Self {
         DynamicScriptFunctionMut {
-            info: FunctionInfo::default(),
+            info: FunctionInfo::default()
+                .with_name(std::any::type_name::<F>())
+                .into(),
             func: Arc::new(RwLock::new(fn_)),
         }
-        .with_name(std::any::type_name::<F>())
     }
 }
 
@@ -283,6 +250,7 @@ impl DerefMut for AppScriptFunctionRegistry {
 /// A thread-safe reference counted wrapper around a [`ScriptFunctionRegistry`]
 pub struct ScriptFunctionRegistryArc(pub Arc<RwLock<ScriptFunctionRegistry>>);
 
+#[profiling::all_functions]
 impl ScriptFunctionRegistryArc {
     /// claim a read lock on the registry
     pub fn read(&self) -> RwLockReadGuard<ScriptFunctionRegistry> {
@@ -308,6 +276,8 @@ pub struct FunctionKey {
 /// A registry of dynamic script functions
 pub struct ScriptFunctionRegistry {
     functions: HashMap<FunctionKey, DynamicScriptFunction>,
+    /// A registry of magic functions
+    pub magic_functions: MagicFunctions,
 }
 
 #[profiling::all_functions]
@@ -593,6 +563,7 @@ macro_rules! impl_script_function {
 
                 let func = (move |caller_context: FunctionCallContext, mut args: VecDeque<ScriptValue> | {
                     let res: Result<ScriptValue, InteropError> = (|| {
+                        profiling::scope!("script function call mechanism");
                         let received_args_len = args.len();
                         let expected_arg_count = count!($($param )*);
 
@@ -603,29 +574,37 @@ macro_rules! impl_script_function {
                             world.with_access_scope(||{
                                 let mut current_arg = 0;
 
-                                $(
-                                    current_arg += 1;
-                                    let $param = args.pop_front();
-                                    let $param = match $param {
-                                        Some($param) => $param,
-                                        None => {
-                                            if let Some(default) = <$param>::default_value() {
-                                                default
-                                            } else {
-                                                return Err(InteropError::argument_count_mismatch(expected_arg_count,received_args_len));
+                                $(let $param = {
+                                        profiling::scope!("argument conversion", &format!("argument #{}", current_arg));
+                                        current_arg += 1;
+                                        let $param = args.pop_front();
+                                        let $param = match $param {
+                                            Some($param) => $param,
+                                            None => {
+                                                if let Some(default) = <$param>::default_value() {
+                                                    default
+                                                } else {
+                                                    return Err(InteropError::argument_count_mismatch(expected_arg_count,received_args_len));
+                                                }
                                             }
-                                        }
+                                        };
+                                        let $param = <$param>::from_script($param, world.clone())
+                                            .map_err(|e| InteropError::function_arg_conversion_error(current_arg.to_string(), e))?;
+                                        $param
                                     };
-                                    let $param = <$param>::from_script($param, world.clone())
-                                        .map_err(|e| InteropError::function_arg_conversion_error(current_arg.to_string(), e))?;
                                 )*
 
                                 let ret = {
-                                    let out = self( $( $context,)?  $( $param.into(), )* );
+                                    let out = {
+                                        profiling::scope!("function call");
+                                        self( $( $context,)?  $( $param.into(), )* )
+                                    };
+
                                     $(
                                         let $out = out?;
                                         let out = $out;
                                     )?
+                                    profiling::scope!("return type conversion");
                                     out.into_script(world.clone()).map_err(|e| InteropError::function_arg_conversion_error("return value".to_owned(), e))
                                 };
                                 ret
@@ -692,7 +671,7 @@ mod test {
     #[test]
     fn test_invalid_amount_of_args_errors_nicely() {
         let fn_ = |a: usize, b: usize| a + b;
-        let script_function = fn_.into_dynamic_script_function().with_name("my_fn");
+        let script_function = fn_.into_dynamic_script_function();
 
         with_local_world(|| {
             let out = script_function.call(
@@ -704,7 +683,7 @@ mod test {
             assert_eq!(
                 out.unwrap_err(),
                 InteropError::function_interop_error(
-                    "my_fn",
+                    "<bevy_mod_scripting_core::bindings::function::script_function::test::test_invalid_amount_of_args_errors_nicely::{{closure}} as bevy_mod_scripting_core::bindings::function::script_function::ScriptFunction<fn(usize, usize) -> usize>>::into_dynamic_script_function::{{closure}}",
                     Namespace::Global,
                     InteropError::argument_count_mismatch(2, 1)
                 )
@@ -718,7 +697,7 @@ mod test {
         struct Comp;
 
         let fn_ = |_a: crate::bindings::function::from::Mut<Comp>| 0usize;
-        let script_function = fn_.into_dynamic_script_function().with_name("my_fn");
+        let script_function = fn_.into_dynamic_script_function();
 
         with_local_world(|| {
             let out = script_function.call(

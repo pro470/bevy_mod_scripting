@@ -401,10 +401,10 @@ impl InteropError {
 
     /// Thrown if a type cannot be converted from reflect, this can happen if the type was unable to
     /// re-construct itself from a dynamic value.
-    pub fn failed_from_reflect(type_id: Option<TypeId>, reason: String) -> Self {
+    pub fn failed_from_reflect(type_id: Option<TypeId>, reason: impl Into<String>) -> Self {
         Self(Arc::new(InteropErrorInner::FailedFromReflect {
             type_id,
-            reason,
+            reason: reason.into(),
         }))
     }
 
@@ -1169,7 +1169,13 @@ macro_rules! invalid_index {
 
 macro_rules! missing_entity {
     ($entity:expr) => {
-        format!("Missing or invalid entity: {}", $entity)
+        {
+            if ($entity.index() == 0) {
+                format!("Invalid entity: {}. Are you trying to use an entity in a callback in which it's unavailable?", $entity)
+            } else {
+                format!("Missing or invalid entity: {}", $entity)
+            }
+        }
     };
 }
 

@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.12.0](https://github.com/makspll/bevy_mod_scripting/compare/v0.11.1...v0.12.0) - 2025-04-07
+
+### Added
+
+- improve errors when entity is unavailable ([#410](https://github.com/makspll/bevy_mod_scripting/pull/410))
+- [**breaking**] Add `BMSPlugin` group, feature flag for bindings per bevy crate & add script global filter options ([#408](https://github.com/makspll/bevy_mod_scripting/pull/408))
+    - The CoreScriptGlobalsPlugin now also stores options for filtering registered globals, which can be changed.
+- add option to emit response event on each callback  & `RunScriptCallback` command for "once-off" callbacks ([#403](https://github.com/makspll/bevy_mod_scripting/pull/403))
+### Fixed
+
+- `lua54` feature being forced ([#413](https://github.com/makspll/bevy_mod_scripting/pull/413))
+- `GetTypeDependency` derive macro using the wrong path for `bms_core` ([#409](https://github.com/makspll/bevy_mod_scripting/pull/409))
+
+### Other
+
+- add script loading benchmark ([#411](https://github.com/makspll/bevy_mod_scripting/pull/411))
+- refactor `ReflectReference` internally ([#406](https://github.com/makspll/bevy_mod_scripting/pull/406))
+- reduces size of `ScriptValue` to 64 bytes, moves some dynamic function methods into function info ([#404](https://github.com/makspll/bevy_mod_scripting/pull/404))
+
+## [0.11.1](https://github.com/makspll/bevy_mod_scripting/compare/v0.11.0...v0.11.1) - 2025-03-29
+
+### Added
+
+- bump bevy to 0.15.3 ([#401](https://github.com/makspll/bevy_mod_scripting/pull/401))
+
+## [0.11.0](https://github.com/makspll/bevy_mod_scripting/compare/v0.10.0...v0.11.0) - 2025-03-29
+
+### Added
+
+- allow the conversion of lua functions into `ScriptValue` via `DynamicScriptFunction` ([#396](https://github.com/makspll/bevy_mod_scripting/pull/396))
+- improve tracing spans, add more benchmarks ([#394](https://github.com/makspll/bevy_mod_scripting/pull/394))
+- add `profile_with_tracy` feature which plays nicely with bevy's `bevy/trace_tracy` feature ([#393](https://github.com/makspll/bevy_mod_scripting/pull/393))
+- Add initial benchmarks, integrate them into CI & add getters/settters for `Scripts` resource ([#381](https://github.com/makspll/bevy_mod_scripting/pull/381))
+- :sparkles: Dynamic Script Components, `register_new_component` binding, `remove_component` no longer requires `ReflectComponent` data ([#379](https://github.com/makspll/bevy_mod_scripting/pull/379))
+- [**breaking**] optimize `get` and `set` functions, add `MagicFunctions` sub-registry ([#397](https://github.com/makspll/bevy_mod_scripting/pull/397))
+- optimize access map ([#395](https://github.com/makspll/bevy_mod_scripting/pull/395))
+- add ScriptValue override for printing opaque values ([#380](https://github.com/makspll/bevy_mod_scripting/pull/380))
+- overhaul mdbook preprocessor, prettify generated docs, support dummy globals ([#377](https://github.com/makspll/bevy_mod_scripting/pull/377))
+
+### Fixed
+
+- fix global type cache not containing generic types ([#388](https://github.com/makspll/bevy_mod_scripting/pull/388))
+
+### Other
+
+- switch to hashbrown hashmap in the function registry ([#399](https://github.com/makspll/bevy_mod_scripting/pull/399))
+- try play with hashing for access maps ([#398](https://github.com/makspll/bevy_mod_scripting/pull/398))
+- allow check creation for bencher
+
 ## [0.10.0](https://github.com/makspll/bevy_mod_scripting/compare/v0.9.11...v0.10.0) - 2025-03-16
 
 ### Added

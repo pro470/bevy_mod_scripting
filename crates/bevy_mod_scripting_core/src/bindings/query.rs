@@ -1,22 +1,24 @@
 //! Utilities for querying the world.
 
-use super::{with_global_access, ReflectReference, WorldAccessGuard};
+use super::{with_global_access, DynamicComponent, ReflectReference, WorldAccessGuard, WorldGuard};
 use crate::error::InteropError;
 use bevy::{
     ecs::{
         component::ComponentId,
         entity::Entity,
         query::{QueryData, QueryState},
+        reflect::ReflectComponent,
         world::World,
     },
     prelude::{EntityRef, QueryBuilder},
+    ptr::OwningPtr,
     reflect::{ParsedPath, Reflect, TypeRegistration},
 };
-use std::{any::TypeId, collections::VecDeque, sync::Arc};
+use std::{any::TypeId, collections::VecDeque, ptr::NonNull, sync::Arc};
 
-/// A wrapper around a `TypeRegistration` that provides additional information about the type.
+/// A reference to a type which is not a `Resource` or `Component`.
 ///
-/// This is used as a hook to a rust type from a scripting language. We should be able to easily convert between a type name and a [`ScriptTypeRegistration`].
+/// In general think of this as a handle to a type.
 #[derive(Clone, Reflect)]
 #[reflect(opaque)]
 pub struct ScriptTypeRegistration {
@@ -24,19 +26,28 @@ pub struct ScriptTypeRegistration {
 }
 
 #[derive(Clone, Reflect, Debug)]
-/// A registration for a component type.
+/// A reference to a component type's reflection registration.
+///
+/// In general think of this as a handle to a type.
+///
+/// Not to be confused with script registered dynamic components, although this can point to a script registered component.
 pub struct ScriptComponentRegistration {
     pub(crate) registration: ScriptTypeRegistration,
     pub(crate) component_id: ComponentId,
+    /// whether this is a component registered BY a script
+    pub(crate) is_dynamic_script_component: bool,
 }
 
 #[derive(Clone, Reflect, Debug)]
-/// A registration for a resource type.
+/// A reference to a resource type's reflection registration.
+///
+/// In general think of this as a handle to a type.
 pub struct ScriptResourceRegistration {
     pub(crate) registration: ScriptTypeRegistration,
     pub(crate) resource_id: ComponentId,
 }
 
+#[profiling::all_functions]
 impl ScriptTypeRegistration {
     /// Creates a new [`ScriptTypeRegistration`] from a [`TypeRegistration`].
     pub fn new(registration: Arc<TypeRegistration>) -> Self {
@@ -66,6 +77,8 @@ impl ScriptTypeRegistration {
         &self.registration
     }
 }
+
+#[profiling::all_functions]
 impl ScriptResourceRegistration {
     /// Creates a new [`ScriptResourceRegistration`] from a [`ScriptTypeRegistration`] and a [`ComponentId`].
     pub fn new(registration: ScriptTypeRegistration, resource_id: ComponentId) -> Self {
@@ -92,10 +105,13 @@ impl ScriptResourceRegistration {
     }
 }
 
+#[profiling::all_functions]
 impl ScriptComponentRegistration {
     /// Creates a new [`ScriptComponentRegistration`] from a [`ScriptTypeRegistration`] and a [`ComponentId`].
     pub fn new(registration: ScriptTypeRegistration, component_id: ComponentId) -> Self {
         Self {
+            is_dynamic_script_component: registration.type_id()
+                == std::any::TypeId::of::<DynamicComponent>(),
             registration,
             component_id,
         }
@@ -116,6 +132,85 @@ impl ScriptComponentRegistration {
     pub fn into_type_registration(self) -> ScriptTypeRegistration {
         self.registration
     }
+
+    /// Removes an instance of this component from the given entity
+    pub fn remove_from_entity(
+        &self,
+        world: WorldGuard,
+        entity: Entity,
+    ) -> Result<(), InteropError> {
+        world.with_global_access(|world| {
+            let mut entity = world
+                .get_entity_mut(entity)
+                .map_err(|_| InteropError::missing_entity(entity))?;
+            entity.remove_by_id(self.component_id);
+            Ok(())
+        })?
+    }
+
+    /// Inserts an instance of this component into the given entity
+    ///
+    /// Requires whole world access
+    pub fn insert_into_entity(
+        &self,
+        world: WorldGuard,
+        entity: Entity,
+        instance: Box<dyn Reflect>,
+    ) -> Result<(), InteropError> {
+        if self.is_dynamic_script_component {
+            // if dynamic we already know the type i.e. `ScriptComponent`
+            // so we can just insert it
+
+            world.with_global_access(|world| {
+                let mut entity = world
+                    .get_entity_mut(entity)
+                    .map_err(|_| InteropError::missing_entity(entity))?;
+                let cast = instance.downcast::<DynamicComponent>().map_err(|v| {
+                    InteropError::type_mismatch(TypeId::of::<DynamicComponent>(), Some(v.type_id()))
+                })?;
+                // the reason we leak the box, is because we don't want to double drop the owning ptr
+
+                let ptr = (Box::leak(cast) as *mut DynamicComponent).cast();
+                // Safety: cannot be null as we just created it from a valid reference
+                let non_null_ptr = unsafe { NonNull::new_unchecked(ptr) };
+                // Safety:
+                // - we know the type is ScriptComponent, as we just created the pointer
+                // - the box will stay valid for the life of this function, and we do not return the ptr
+                // - pointer is alligned correctly
+                // - nothing else will call drop on this
+                let owning_ptr = unsafe { OwningPtr::new(non_null_ptr) };
+                // Safety:
+                // - Owning Ptr is valid as we just created it
+                // - TODO: do we need to check if ComponentId is from this world? How?
+                unsafe { entity.insert_by_id(self.component_id, owning_ptr) };
+                Ok(())
+            })?
+        } else {
+            let component_data = self
+                .type_registration()
+                .type_registration()
+                .data::<ReflectComponent>()
+                .ok_or_else(|| {
+                    InteropError::missing_type_data(
+                        self.registration.type_id(),
+                        "ReflectComponent".to_owned(),
+                    )
+                })?;
+
+            //  TODO: this shouldn't need entire world access it feels
+            let type_registry = world.type_registry();
+            world.with_global_access(|world| {
+                let mut entity = world
+                    .get_entity_mut(entity)
+                    .map_err(|_| InteropError::missing_entity(entity))?;
+                {
+                    let registry = type_registry.read();
+                    component_data.insert(&mut entity, instance.as_partial_reflect(), &registry);
+                }
+                Ok(())
+            })?
+        }
+    }
 }
 
 impl std::fmt::Debug for ScriptTypeRegistration {
@@ -134,13 +229,32 @@ impl std::fmt::Display for ScriptTypeRegistration {
 
 #[derive(Clone, Default, Reflect)]
 #[reflect(opaque)]
-/// A builder for a query.
+/// The query builder is used to build ECS queries which retrieve spefific components filtered by specific conditions.
+///
+/// For example:
+/// ```rust,ignore
+/// builder.component(componentA)
+///     .component(componentB)
+///     .with(componentC)
+///     .without(componentD)  
+/// ```
+///
+/// Will retrieve entities which:
+/// - Have componentA
+/// - Have componentB
+/// - Have componentC
+/// - Do not have componentD
+///
+/// As well as references to components:
+/// - componentA
+/// - componentB
 pub struct ScriptQueryBuilder {
     pub(crate) components: Vec<ScriptComponentRegistration>,
     with: Vec<ScriptComponentRegistration>,
     without: Vec<ScriptComponentRegistration>,
 }
 
+#[profiling::all_functions]
 impl ScriptQueryBuilder {
     /// Adds components to the query.
     pub fn components(&mut self, components: Vec<ScriptComponentRegistration>) -> &mut Self {
