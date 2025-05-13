@@ -3,10 +3,10 @@
 use bevy::{
     app::{App, Plugin, PostUpdate},
     diagnostic::{Diagnostic, DiagnosticPath, Diagnostics, RegisterDiagnostic},
-    ecs::system::{Res, Resource},
+    ecs::{system::Res, resource::Resource},
     prelude::ResMut,
     reflect::PartialReflect,
-    utils::hashbrown::HashMap,
+    platform::collections::HashMap,
 };
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{

@@ -1,12 +1,13 @@
 //! Traits and types for managing script contexts.
 
+use bevy::ecs::{entity::Entity, resource::Resource};
+
 use crate::{
     bindings::{ThreadWorldContainer, WorldContainer, WorldGuard},
     error::{InteropError, ScriptError},
     script::ScriptId,
     IntoScriptPluginParams,
 };
-use bevy::ecs::{entity::Entity, system::Resource};
 
 /// A trait that all script contexts must implement.
 ///

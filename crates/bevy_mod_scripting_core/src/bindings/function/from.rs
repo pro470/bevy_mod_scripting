@@ -585,4 +585,17 @@ macro_rules! impl_from_script_tuple {
     };
 }
 
-bevy::utils::all_tuples!(impl_from_script_tuple, 1, 14, T);
+impl_from_script_tuple!(T0);
+impl_from_script_tuple!(T0, T1);
+impl_from_script_tuple!(T0, T1, T2);
+impl_from_script_tuple!(T0, T1, T2, T3);
+impl_from_script_tuple!(T0, T1, T2, T3, T4);
+impl_from_script_tuple!(T0, T1, T2, T3, T4, T5);
+impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6);
+impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7);
+impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8);
+impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9);
+impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
+impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
+impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
+impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13);

@@ -1,7 +1,8 @@
 //! Event handlers and event types for scripting.
 
-use crate::{bindings::script_value::ScriptValue, error::ScriptError, script::ScriptId};
 use bevy::{ecs::entity::Entity, prelude::Event, reflect::Reflect};
+
+use crate::{bindings::script_value::ScriptValue, error::ScriptError, script::ScriptId};
 
 /// An error coming from a script
 #[derive(Debug, Event)]

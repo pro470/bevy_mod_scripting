@@ -25,9 +25,8 @@ use bindings::{
     script_value::{FromDynamic, IntoDynamic},
 };
 use parking_lot::RwLock;
-use rhai::{CallFnOptions, Dynamic, Engine, EvalAltResult, Scope, AST};
-
 pub use rhai;
+use rhai::{CallFnOptions, Dynamic, Engine, EvalAltResult, Scope, AST};
 /// Bindings for rhai.
 pub mod bindings;
 

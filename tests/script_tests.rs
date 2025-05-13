@@ -6,7 +6,6 @@ use libtest_mimic::{Arguments, Failed, Trial};
 use script_integration_test_harness::{
     execute_lua_integration_test, execute_rhai_integration_test,
 };
-
 use test_utils::{discover_all_tests, Test, TestKind};
 
 trait TestExecutor {

@@ -9,8 +9,9 @@ use bevy::ecs::{
     entity::Entity,
     event::{Event, EventCursor, EventIterator, Events},
     query::{Access, AccessConflicts},
+    resource::Resource,
     storage::SparseSetIndex,
-    system::{Local, Resource, SystemParam, SystemState},
+    system::{Local, SystemParam, SystemState},
     world::World,
 };
 use fixedbitset::FixedBitSet;
@@ -365,7 +366,7 @@ unsafe impl<T: SystemParam> SystemParam for WithWorldGuard<'_, '_, T> {
         state: &Self::State,
         system_meta: &bevy::ecs::system::SystemMeta,
         world: bevy::ecs::world::unsafe_world_cell::UnsafeWorldCell,
-    ) -> bool {
+    ) -> std::result::Result<(), bevy::ecs::system::SystemParamValidationError> {
         T::validate_param(&state.0, system_meta, world)
     }
 }

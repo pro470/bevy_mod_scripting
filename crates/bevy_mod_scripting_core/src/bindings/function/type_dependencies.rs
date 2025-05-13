@@ -156,7 +156,20 @@ macro_rules! register_tuple_dependencies {
 }
 
 
-bevy::utils::all_tuples!(register_tuple_dependencies, 1, 14, T);
+register_tuple_dependencies!(T0);
+register_tuple_dependencies!(T0, T1);
+register_tuple_dependencies!(T0, T1, T2);
+register_tuple_dependencies!(T0, T1, T2, T3);
+register_tuple_dependencies!(T0, T1, T2, T3, T4);
+register_tuple_dependencies!(T0, T1, T2, T3, T4, T5);
+register_tuple_dependencies!(T0, T1, T2, T3, T4, T5, T6);
+register_tuple_dependencies!(T0, T1, T2, T3, T4, T5, T6, T7);
+register_tuple_dependencies!(T0, T1, T2, T3, T4, T5, T6, T7, T8);
+register_tuple_dependencies!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9);
+register_tuple_dependencies!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
+register_tuple_dependencies!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
+register_tuple_dependencies!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
+register_tuple_dependencies!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13);
 
 /// A trait collecting type dependency information for a whole function. Used to register everything used by a function with the type registry
 pub trait GetFunctionTypeDependencies<Marker> {
@@ -184,4 +197,16 @@ macro_rules! impl_script_function_type_dependencies{
     };
 }
 
-bevy::utils::all_tuples!(impl_script_function_type_dependencies, 0, 13, T);
+impl_script_function_type_dependencies!();
+impl_script_function_type_dependencies!(T0);
+impl_script_function_type_dependencies!(T0, T1);
+impl_script_function_type_dependencies!(T0, T1, T2);
+impl_script_function_type_dependencies!(T0, T1, T2, T3);
+impl_script_function_type_dependencies!(T0, T1, T2, T3, T4);
+impl_script_function_type_dependencies!(T0, T1, T2, T3, T4, T5);
+impl_script_function_type_dependencies!(T0, T1, T2, T3, T4, T5, T6);
+impl_script_function_type_dependencies!(T0, T1, T2, T3, T4, T5, T6, T7);
+impl_script_function_type_dependencies!(T0, T1, T2, T3, T4, T5, T6, T7, T8);
+impl_script_function_type_dependencies!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9);
+impl_script_function_type_dependencies!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
+impl_script_function_type_dependencies!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);

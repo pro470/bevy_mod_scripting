@@ -1,5 +1,23 @@
 //! Errors that can occur when interacting with the scripting system
 
+use std::{
+    any::TypeId,
+    borrow::Cow,
+    fmt::{Debug, Display},
+    ops::Deref,
+    str::Utf8Error,
+    sync::Arc,
+};
+
+use bevy::{
+    ecs::{
+        component::ComponentId,
+        schedule::{ScheduleBuildError, ScheduleNotInitialized},
+    },
+    prelude::Entity,
+    reflect::{PartialReflect, Reflect},
+};
+
 use crate::{
     bindings::{
         access_map::{DisplayCodeLocation, ReflectAccessId},
@@ -9,22 +27,6 @@ use crate::{
         ReflectBaseType, ReflectReference,
     },
     script::ScriptId,
-};
-use bevy::{
-    ecs::{
-        component::ComponentId,
-        schedule::{ScheduleBuildError, ScheduleNotInitialized},
-    },
-    prelude::Entity,
-    reflect::{PartialReflect, Reflect},
-};
-use std::{
-    any::TypeId,
-    borrow::Cow,
-    fmt::{Debug, Display},
-    ops::Deref,
-    str::Utf8Error,
-    sync::Arc,
 };
 
 /// An error with an optional script Context
@@ -1599,11 +1601,10 @@ impl Default for InteropErrorInner {
 mod test {
     use bevy::prelude::{AppTypeRegistry, World};
 
+    use super::*;
     use crate::bindings::{
         function::script_function::AppScriptFunctionRegistry, AppReflectAllocator, WorldGuard,
     };
-
-    use super::*;
 
     #[test]
     fn test_error_display() {

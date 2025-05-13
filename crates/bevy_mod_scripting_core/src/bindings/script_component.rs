@@ -6,13 +6,14 @@ use bevy::{
     app::{App, Plugin},
     ecs::{
         component::{Component, ComponentDescriptor, StorageType},
-        system::Resource,
+        resource::Resource,
     },
     reflect::{prelude::ReflectDefault, GetTypeRegistration, Reflect},
-    utils::HashMap,
+    platform::collections::HashMap,
 };
 use parking_lot::RwLock;
 use std::{alloc::Layout, mem::needs_drop, sync::Arc};
+use bevy::ecs::component::{ComponentCloneBehavior, Mutable};
 
 /// A dynamic script component
 #[derive(Reflect, Clone, Default)]
@@ -30,7 +31,9 @@ pub struct DynamicComponentInfo {
 }
 
 impl Component for DynamicComponent {
+
     const STORAGE_TYPE: StorageType = StorageType::Table;
+    type Mutability = Mutable;
 }
 
 /// A registry of dynamically registered script components
@@ -96,6 +99,8 @@ impl WorldAccessGuard<'_> {
                     DynamicComponent::STORAGE_TYPE,
                     Layout::new::<DynamicComponent>(),
                     needs_drop::<DynamicComponent>().then_some(|x| x.drop_as::<DynamicComponent>()),
+                    true,
+                    ComponentCloneBehavior::Default
                 )
             };
             w.register_component_with_descriptor(descriptor)

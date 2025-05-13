@@ -2,7 +2,6 @@
 //!
 //! Contains language agnostic systems and types for handling scripting in bevy.
 
-use crate::event::ScriptErrorEvent;
 use asset::{
     configure_asset_systems, configure_asset_systems_for_plugin, Language, ScriptAsset,
     ScriptAssetLoader, ScriptAssetSettings,
@@ -23,6 +22,8 @@ use event::{ScriptCallbackEvent, ScriptCallbackResponseEvent};
 use handler::{CallbackSettings, HandlerFn};
 use runtime::{initialize_runtime, Runtime, RuntimeContainer, RuntimeInitializer, RuntimeSettings};
 use script::{ScriptComponent, ScriptId, Scripts, StaticScripts};
+
+use crate::event::ScriptErrorEvent;
 
 pub mod asset;
 pub mod bindings;

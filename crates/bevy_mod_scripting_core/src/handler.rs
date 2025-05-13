@@ -1,4 +1,16 @@
 //! Contains the logic for handling script callback events
+use bevy::{
+    ecs::{
+        entity::Entity,
+        query::QueryState,
+        resource::Resource,
+        system::{Local, SystemState},
+        world::{Mut, World},
+    },
+    log::trace_once,
+    prelude::{Events, Ref},
+};
+
 use crate::{
     bindings::{
         pretty_print::DisplayWithWorld, script_value::ScriptValue, ThreadWorldContainer,
@@ -13,16 +25,6 @@ use crate::{
     extractors::{HandlerContext, WithWorldGuard},
     script::{ScriptComponent, ScriptId},
     IntoScriptPluginParams,
-};
-use bevy::{
-    ecs::{
-        entity::Entity,
-        query::QueryState,
-        system::{Local, Resource, SystemState},
-        world::{Mut, World},
-    },
-    log::trace_once,
-    prelude::{Events, Ref},
 };
 
 /// A function that handles a callback event
@@ -295,6 +297,7 @@ mod test {
     use parking_lot::Mutex;
     use test_utils::make_test_plugin;
 
+    use super::*;
     use crate::{
         bindings::script_value::ScriptValue,
         context::{ContextBuilder, ContextLoadingSettings},
@@ -303,8 +306,6 @@ mod test {
         script::{Script, ScriptComponent, ScriptId, Scripts, StaticScripts},
         BMSScriptingInfrastructurePlugin,
     };
-
-    use super::*;
     struct OnTestCallback;
 
     impl IntoCallbackLabel for OnTestCallback {

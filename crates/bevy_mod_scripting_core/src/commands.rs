@@ -1,5 +1,10 @@
 //! Commands for creating, updating and deleting scripts
 
+use std::{marker::PhantomData, sync::Arc};
+
+use bevy::{asset::Handle, ecs::entity::Entity, log::debug, prelude::Command};
+use parking_lot::Mutex;
+
 use crate::{
     asset::ScriptAsset,
     bindings::{ScriptValue, WorldGuard},
@@ -14,9 +19,6 @@ use crate::{
     script::{Script, ScriptId, Scripts, StaticScripts},
     IntoScriptPluginParams,
 };
-use bevy::{asset::Handle, ecs::entity::Entity, log::debug, prelude::Command};
-use parking_lot::Mutex;
-use std::{marker::PhantomData, sync::Arc};
 
 /// Deletes a script with the given ID
 pub struct DeleteScript<P: IntoScriptPluginParams> {
@@ -384,6 +386,7 @@ mod test {
         prelude::{Entity, World},
     };
 
+    use super::*;
     use crate::{
         asset::Language,
         bindings::script_value::ScriptValue,
@@ -392,8 +395,6 @@ mod test {
         runtime::RuntimeContainer,
         script::Scripts,
     };
-
-    use super::*;
 
     fn setup_app() -> App {
         // setup all the resources necessary

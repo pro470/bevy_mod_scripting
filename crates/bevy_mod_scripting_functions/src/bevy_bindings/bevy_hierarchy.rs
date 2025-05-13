@@ -18,14 +18,14 @@ pub struct BevyHierarchyScriptingPlugin;
     bms_core_path = "bevy_mod_scripting_core",
     generated
 )]
-impl bevy::hierarchy::prelude::Children {
+impl bevy::ecs::hierarchy::Children {
     ///  Swaps the child at `a_index` with the child at `b_index`.
     fn swap(
-        mut _self: Mut<bevy::hierarchy::prelude::Children>,
+        mut _self: Mut<bevy::ecs::hierarchy::Children>,
         a_index: usize,
         b_index: usize,
     ) -> () {
-        let output: () = bevy::hierarchy::prelude::Children::swap(
+        let output: () = bevy::ecs::hierarchy::Children::swap(
                 &mut _self,
                 a_index,
                 b_index,
@@ -40,74 +40,40 @@ impl bevy::hierarchy::prelude::Children {
     bms_core_path = "bevy_mod_scripting_core",
     generated
 )]
-impl bevy::hierarchy::prelude::Parent {
-    fn assert_receiver_is_total_eq(_self: Ref<bevy::hierarchy::prelude::Parent>) -> () {
-        let output: () = <bevy::hierarchy::prelude::Parent as std::cmp::Eq>::assert_receiver_is_total_eq(
+impl bevy::ecs::hierarchy::ChildOf {
+    fn assert_receiver_is_total_eq(_self: Ref<bevy::ecs::hierarchy::ChildOf>) -> () {
+        let output: () = <bevy::ecs::hierarchy::ChildOf as std::cmp::Eq>::assert_receiver_is_total_eq(
                 &_self,
             )
             .into();
         output
     }
     fn eq(
-        _self: Ref<bevy::hierarchy::prelude::Parent>,
-        other: Ref<bevy::hierarchy::prelude::Parent>,
+        _self: Ref<bevy::ecs::hierarchy::ChildOf>,
+        other: Ref<bevy::ecs::hierarchy::ChildOf>,
     ) -> bool {
-        let output: bool = <bevy::hierarchy::prelude::Parent as std::cmp::PartialEq<
-            bevy::hierarchy::prelude::Parent,
+        let output: bool = <bevy::ecs::hierarchy::ChildOf as std::cmp::PartialEq<
+            bevy::ecs::hierarchy::ChildOf,
         >>::eq(&_self, &other)
             .into();
         output
     }
     ///  Gets the [`Entity`] ID of the parent.
     fn get(
-        _self: Ref<bevy::hierarchy::prelude::Parent>,
+        _self: Ref<bevy::ecs::hierarchy::ChildOf>,
     ) -> Val<bevy::ecs::entity::Entity> {
-        let output: Val<bevy::ecs::entity::Entity> = bevy::hierarchy::prelude::Parent::get(
+        let output: Val<bevy::ecs::entity::Entity> = bevy::ecs::hierarchy::ChildOf::get(
                 &_self,
             )
             .into();
         output
     }
 }
-#[script_bindings(
-    remote,
-    name = "hierarchy_event_functions",
-    bms_core_path = "bevy_mod_scripting_core",
-    generated
-)]
-impl bevy::hierarchy::HierarchyEvent {
-    fn assert_receiver_is_total_eq(_self: Ref<bevy::hierarchy::HierarchyEvent>) -> () {
-        let output: () = <bevy::hierarchy::HierarchyEvent as std::cmp::Eq>::assert_receiver_is_total_eq(
-                &_self,
-            )
-            .into();
-        output
-    }
-    fn clone(
-        _self: Ref<bevy::hierarchy::HierarchyEvent>,
-    ) -> Val<bevy::hierarchy::HierarchyEvent> {
-        let output: Val<bevy::hierarchy::HierarchyEvent> = <bevy::hierarchy::HierarchyEvent as std::clone::Clone>::clone(
-                &_self,
-            )
-            .into();
-        output
-    }
-    fn eq(
-        _self: Ref<bevy::hierarchy::HierarchyEvent>,
-        other: Ref<bevy::hierarchy::HierarchyEvent>,
-    ) -> bool {
-        let output: bool = <bevy::hierarchy::HierarchyEvent as std::cmp::PartialEq<
-            bevy::hierarchy::HierarchyEvent,
-        >>::eq(&_self, &other)
-            .into();
-        output
-    }
-}
+
 impl ::bevy::app::Plugin for BevyHierarchyScriptingPlugin {
     fn build(&self, app: &mut ::bevy::prelude::App) {
         let mut world = app.world_mut();
         register_children_functions(&mut world);
         register_parent_functions(&mut world);
-        register_hierarchy_event_functions(&mut world);
     }
 }

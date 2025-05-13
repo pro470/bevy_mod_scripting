@@ -9,17 +9,7 @@ use super::{
     ScriptQueryBuilder, ScriptQueryResult, ScriptResourceRegistration, WorldAccessGuard,
     WorldGuard,
 };
-use crate::{
-    bindings::pretty_print::DisplayWithWorld,
-    context::ContextLoadingSettings,
-    error::{InteropError, ScriptError},
-    event::CallbackLabel,
-    extractors::get_all_access_ids,
-    handler::CallbackSettings,
-    runtime::RuntimeContainer,
-    script::{ScriptId, Scripts},
-    IntoScriptPluginParams,
-};
+use crate::{bindings, bindings::pretty_print::DisplayWithWorld, context::ContextLoadingSettings, error::{InteropError, ScriptError}, event::CallbackLabel, extractors::get_all_access_ids, handler::CallbackSettings, runtime::RuntimeContainer, script::{ScriptId, Scripts}, IntoScriptPluginParams};
 use bevy::{
     ecs::{
         archetype::{ArchetypeComponentId, ArchetypeGeneration},
@@ -27,15 +17,18 @@ use bevy::{
         entity::Entity,
         query::{Access, FilteredAccess, FilteredAccessSet, QueryState},
         reflect::AppTypeRegistry,
-        schedule::{IntoSystemConfigs, SystemSet},
+        schedule::{IntoScheduleConfigs, SystemSet},
         system::{IntoSystem, System},
         world::{unsafe_world_cell::UnsafeWorldCell, World},
     },
     reflect::{OffsetAccess, ParsedPath, Reflect},
-    utils::hashbrown::HashSet,
+    platform::collections::HashSet,
 };
 use bevy_system_reflection::{ReflectSchedule, ReflectSystem};
 use std::{any::TypeId, borrow::Cow, hash::Hash, marker::PhantomData, ops::Deref};
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
+
 #[derive(Clone, Hash, PartialEq, Eq)]
 /// a system set for script systems.
 pub struct ScriptSystemSet(Cow<'static, str>);
@@ -160,7 +153,8 @@ impl ScriptSystemBuilder {
             // this is quite important, by default systems are placed in a set defined by their TYPE, i.e. in this case
             // all script systems would be the same
             // let set = ScriptSystemSet::next();
-            let mut system_config = IntoSystemConfigs::<IsDynamicScriptSystem<P>>::into_configs(self);            // apply ordering
+            let mut system_config = IntoScheduleConfigs::<ScheduleSystem,IsDynamicScriptSystem<P>>::into_configs(self);            // apply ordering
+
             for (other, is_before) in before_systems
                 .into_iter()
                 .map(|b| (b, true))
@@ -190,6 +184,12 @@ impl ScriptSystemBuilder {
                 .ok_or_else(|| InteropError::invariant("After adding the system, it was not found in the schedule, could not return a reference to it"))?;
             Ok(ReflectSystem::from_system(system.as_ref(), node_id))
         })?
+    }
+}
+
+impl<P: IntoScriptPluginParams> IntoScheduleConfigs::<ScheduleSystem,IsDynamicScriptSystem<P>> for ScriptSystemBuilder {
+    fn into_configs(self) -> ScheduleConfigs<ScheduleSystem> {
+        Box::<bindings::script_system::DynamicScriptSystem<P>>::new(IntoSystem::into_system(self)).into_configs()
     }
 }
 
@@ -643,8 +643,8 @@ impl<P: IntoScriptPluginParams> System for DynamicScriptSystem<P> {
     unsafe fn validate_param_unsafe(
         &mut self,
         _world: bevy::ecs::world::unsafe_world_cell::UnsafeWorldCell,
-    ) -> bool {
-        true
+    ) -> std::result::Result<(), bevy::ecs::system::SystemParamValidationError> {
+        Ok(())
     }
 
     fn default_system_sets(&self) -> Vec<bevy::ecs::schedule::InternedSystemSet> {
@@ -655,7 +655,7 @@ impl<P: IntoScriptPluginParams> System for DynamicScriptSystem<P> {
         TypeId::of::<Self>()
     }
 
-    fn validate_param(&mut self, world: &World) -> bool {
+    fn validate_param(&mut self, world: &World) -> std::result::Result<(), bevy::ecs::system::SystemParamValidationError> {
         let world_cell = world.as_unsafe_world_cell_readonly();
         self.update_archetype_component_access(world_cell);
         // SAFETY:

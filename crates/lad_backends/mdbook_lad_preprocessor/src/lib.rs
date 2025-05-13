@@ -1,12 +1,13 @@
 //! The library crate for the mdbook LAD preprocessor.
 #![allow(missing_docs)]
 
+use std::sync::OnceLock;
+
 use mdbook::{
     errors::Error,
     preprocess::{Preprocessor, PreprocessorContext},
 };
 use sections::{Section, SectionData};
-use std::sync::OnceLock;
 mod argument_visitor;
 mod markdown;
 mod sections;

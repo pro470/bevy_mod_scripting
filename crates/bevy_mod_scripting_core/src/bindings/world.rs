@@ -35,10 +35,11 @@ use bevy::{
         component::{Component, ComponentId},
         entity::Entity,
         reflect::{AppTypeRegistry, ReflectFromWorld, ReflectResource},
-        system::{Commands, Resource},
+        system::Commands,
+        resource::Resource,
         world::{unsafe_world_cell::UnsafeWorldCell, CommandQueue, Mut, World},
     },
-    hierarchy::{BuildChildren, Children, DespawnRecursiveExt, Parent},
+    ecs::hierarchy::{Children, ChildOf},
     reflect::{
         std_traits::ReflectDefault, DynamicEnum, DynamicStruct, DynamicTuple, DynamicTupleStruct,
         DynamicVariant, ParsedPath, PartialReflect, TypeRegistryArc,
@@ -54,6 +55,7 @@ use std::{
     rc::Rc,
     sync::{atomic::AtomicBool, Arc},
 };
+use bevy::ecs::component::Mutable;
 
 /// Prefer to directly using [`WorldAccessGuard`]. If the underlying type changes, this alias will be updated.
 pub type WorldGuard<'w> = WorldAccessGuard<'w>;
@@ -446,7 +448,7 @@ impl<'w> WorldAccessGuard<'w> {
             format!("Could not access component: {}", std::any::type_name::<T>()),
             {
                 // Safety: we have acquired access for the duration of the closure
-                f(unsafe { cell.get_entity(entity).and_then(|e| e.get::<T>()) })
+                f(unsafe { cell.get_entity(entity).map(|e| e.get::<T>()).unwrap_or(None) })
             }
         )
     }
@@ -454,7 +456,7 @@ impl<'w> WorldAccessGuard<'w> {
     /// Safely accesses the component by claiming and releasing access to it.
     pub fn with_component_mut<F, T, O>(&self, entity: Entity, f: F) -> Result<O, InteropError>
     where
-        T: Component,
+        T: Component<Mutability = Mutable>,
         F: FnOnce(Option<Mut<T>>) -> O,
     {
         let cell = self.as_unsafe_world_cell()?;
@@ -466,7 +468,7 @@ impl<'w> WorldAccessGuard<'w> {
             format!("Could not access component: {}", std::any::type_name::<T>()),
             {
                 // Safety: we have acquired access for the duration of the closure
-                f(unsafe { cell.get_entity(entity).and_then(|e| e.get_mut::<T>()) })
+                f(unsafe { cell.get_entity(entity).map(|e| e.get_mut::<T>()).unwrap_or(None) })
             }
         )
     }
@@ -478,7 +480,7 @@ impl<'w> WorldAccessGuard<'w> {
         f: F,
     ) -> Result<O, InteropError>
     where
-        T: Component + Default,
+        T: Component<Mutability = Mutable> + Default,
         F: FnOnce(&mut T) -> O,
     {
         self.with_global_access(|world| match world.get_mut::<T>(entity) {
@@ -536,7 +538,7 @@ impl<'w> WorldAccessGuard<'w> {
     /// checks if a given entity exists and is valid
     pub fn is_valid_entity(&self, entity: Entity) -> Result<bool, InteropError> {
         let cell = self.as_unsafe_world_cell()?;
-        Ok(cell.get_entity(entity).is_some() && entity.index() != 0)
+        Ok(cell.get_entity(entity).is_ok() && entity.index() != 0)
     }
 
     /// Tries to call a fitting overload of the function with the given name and in the type id's namespace based on the arguments provided.
@@ -988,8 +990,7 @@ impl WorldAccessGuard<'_> {
     ) -> Result<Option<ReflectReference>, InteropError> {
         let cell = self.as_unsafe_world_cell()?;
         let entity = cell
-            .get_entity(entity)
-            .ok_or_else(|| InteropError::missing_entity(entity))?;
+            .get_entity(entity).ok().ok_or_else(|| InteropError::missing_entity(entity))?;
 
         if entity.contains_id(component_registration.component_id) {
             Ok(Some(ReflectReference {
@@ -1015,8 +1016,7 @@ impl WorldAccessGuard<'_> {
     ) -> Result<bool, InteropError> {
         let cell = self.as_unsafe_world_cell()?;
         let entity = cell
-            .get_entity(entity)
-            .ok_or_else(|| InteropError::missing_entity(entity))?;
+            .get_entity(entity).ok().ok_or_else(|| InteropError::missing_entity(entity))?;
 
         Ok(entity.contains_id(component_id))
     }
@@ -1111,7 +1111,7 @@ impl WorldAccessGuard<'_> {
             return Err(InteropError::missing_entity(entity));
         }
 
-        self.with_component(entity, |c: Option<&Parent>| c.map(|c| c.get()))
+        self.with_component(entity, |c: Option<&ChildOf>| c.map(|c| c.parent()))
     }
 
     /// insert children into the given entity
@@ -1185,7 +1185,7 @@ impl WorldAccessGuard<'_> {
         self.with_global_access(|world| {
             let mut queue = CommandQueue::default();
             let mut commands = Commands::new(&mut queue, world);
-            commands.entity(parent).despawn_recursive();
+            commands.entity(parent).despawn();
             queue.apply(world);
         })
     }
@@ -1213,7 +1213,7 @@ impl WorldAccessGuard<'_> {
         self.with_global_access(|world| {
             let mut queue = CommandQueue::default();
             let mut commands = Commands::new(&mut queue, world);
-            commands.entity(parent).despawn_descendants();
+            commands.entity(parent).despawn();
             queue.apply(world);
         })
     }

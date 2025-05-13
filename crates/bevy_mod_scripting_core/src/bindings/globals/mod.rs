@@ -9,7 +9,7 @@ use crate::{
     docgen::{into_through_type_info, typed_through::ThroughTypeInfo},
     error::InteropError,
 };
-use bevy::{ecs::system::Resource, reflect::Typed, utils::hashbrown::HashMap};
+use bevy::{ecs::resource::Resource, reflect::Typed, platform::collections::HashMap};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{any::TypeId, borrow::Cow, sync::Arc};
 

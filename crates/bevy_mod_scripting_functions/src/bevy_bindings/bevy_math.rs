@@ -502,15 +502,6 @@ impl bevy::math::Ray3d {
 )]
 impl bevy::math::Rot2 {
     ///  Returns the angle in radians needed to make `self` and `other` coincide.
-    fn angle_between(_self: Val<bevy::math::Rot2>, other: Val<bevy::math::Rot2>) -> f32 {
-        let output: f32 = bevy::math::Rot2::angle_between(
-                _self.into_inner(),
-                other.into_inner(),
-            )
-            .into();
-        output
-    }
-    ///  Returns the angle in radians needed to make `self` and `other` coincide.
     fn angle_to(_self: Val<bevy::math::Rot2>, other: Val<bevy::math::Rot2>) -> f32 {
         let output: f32 = bevy::math::Rot2::angle_to(
                 _self.into_inner(),
@@ -3391,12 +3382,12 @@ impl bevy::math::primitives::Segment2d {
     }
     ///  Create a new `Segment2d` from a direction and full length of the segment
     fn new(
-        direction: Val<bevy::math::prelude::Dir2>,
-        length: f32,
+        direction: Val<bevy::math::prelude::Vec2>,
+        length: Val<bevy::math::prelude::Vec2>,
     ) -> Val<bevy::math::primitives::Segment2d> {
         let output: Val<bevy::math::primitives::Segment2d> = bevy::math::primitives::Segment2d::new(
                 direction.into_inner(),
-                length,
+                length.into_inner(),
             )
             .into();
         output
@@ -4040,12 +4031,12 @@ impl bevy::math::primitives::Segment3d {
     }
     ///  Create a new `Segment3d` from a direction and full length of the segment
     fn new(
-        direction: Val<bevy::math::prelude::Dir3>,
-        length: f32,
+        direction: Val<bevy::math::prelude::Vec3>,
+        length: Val<bevy::math::prelude::Vec3>,
     ) -> Val<bevy::math::primitives::Segment3d> {
         let output: Val<bevy::math::primitives::Segment3d> = bevy::math::primitives::Segment3d::new(
                 direction.into_inner(),
-                length,
+                length.into_inner(),
             )
             .into();
         output

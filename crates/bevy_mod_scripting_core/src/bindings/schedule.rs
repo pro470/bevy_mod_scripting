@@ -9,7 +9,7 @@ use bevy::{
     },
     ecs::{
         schedule::{Schedule, ScheduleLabel, Schedules},
-        system::Resource,
+        resource::Resource,
         world::World,
     },
 };

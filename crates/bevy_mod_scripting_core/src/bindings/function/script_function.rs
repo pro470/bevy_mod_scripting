@@ -11,7 +11,7 @@ use crate::{
     ScriptValue,
 };
 use bevy::prelude::{Reflect, Resource};
-use bevy::utils::hashbrown::HashMap;
+use bevy::platform::collections::HashMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -622,7 +622,20 @@ macro_rules! impl_script_function {
     };
 }
 
-bevy::utils::all_tuples!(impl_script_function, 0, 13, T);
+impl_script_function!();
+impl_script_function!(T0);
+impl_script_function!(T0, T1);
+impl_script_function!(T0, T1, T2);
+impl_script_function!(T0, T1, T2, T3);
+impl_script_function!(T0, T1, T2, T3, T4);
+impl_script_function!(T0, T1, T2, T3, T4, T5);
+impl_script_function!(T0, T1, T2, T3, T4, T5, T6);
+impl_script_function!(T0, T1, T2, T3, T4, T5, T6, T7);
+impl_script_function!(T0, T1, T2, T3, T4, T5, T6, T7, T8);
+impl_script_function!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9);
+impl_script_function!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
+impl_script_function!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
+impl_script_function!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
 
 #[cfg(test)]
 mod test {
