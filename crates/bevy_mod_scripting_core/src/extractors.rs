@@ -74,41 +74,49 @@ impl<T: Resource + Default> DerefMut for ResScope<'_, T> {
     }
 }
 
-unsafe impl<T: Resource + Default> SystemParam for ResScope<'_, T> {
-    type State = (T, bool);
+/// The state for [`ResScope`].
+pub struct ResourceState<T: Resource + Default> {
+    marker: std::marker::PhantomData<T>,
+}
 
+unsafe impl<T: Resource + Default> SystemParam for ResScope<'_, T> {
+    type State = ResourceState<T>;
     type Item<'world, 'state> = ResScope<'state, T>;
 
-    fn init_state(
-        _world: &mut World,
-        system_meta: &mut bevy::ecs::system::SystemMeta,
-    ) -> Self::State {
-        system_meta.set_has_deferred();
-        (T::default(), false)
+    fn init_state(world: &mut World, _system_meta: &mut bevy::ecs::system::SystemMeta) -> Self::State {
+        world.init_resource::<T>();
+        ResourceState {
+            marker: std::marker::PhantomData,
+        }
     }
 
     unsafe fn get_param<'world, 'state>(
-        state: &'state mut Self::State,
+        _state: &'state mut Self::State,
         _system_meta: &bevy::ecs::system::SystemMeta,
         world: bevy::ecs::world::unsafe_world_cell::UnsafeWorldCell<'world>,
         _change_tick: bevy::ecs::component::Tick,
     ) -> Self::Item<'world, 'state> {
-        state.1 = true;
-        if let Some(mut r) = world.get_resource_mut::<T>() {
-            std::mem::swap(&mut state.0, &mut r);
-        }
-        ResScope(&mut state.0)
-    }
+        // Get the resource pointer
+        let resource_ref = if let Some(mut ptr) = unsafe {
+            if let Some(item) = world.get_resource_mut::<T>() {
+                Some(item)
+            } else {
+                {
+                    world.world_mut().init_resource::<T>();
+                }
+                world.get_resource_mut::<T>()
+            }
+        } {
+            // IMPORTANT: Use the correct approach to get a reference with 'world lifetime
+            // This uses unsafe to extend the lifetime, but is safe because we know
+            // the resource lives for the 'world lifetime
+            let raw_ptr = ptr.as_mut() as *mut T;
+            unsafe { &mut *raw_ptr }
+        } else {
+            unreachable!()
+        };
 
-    fn apply(
-        state: &mut Self::State,
-        _system_meta: &bevy::ecs::system::SystemMeta,
-        world: &mut bevy::ecs::world::World,
-    ) {
-        if state.1 {
-            world.insert_resource(std::mem::take(&mut state.0));
-            state.1 = false;
-        }
+        ResScope(resource_ref)
     }
 }
 
