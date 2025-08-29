@@ -14,10 +14,12 @@ fn add_executable_dir_to_path() {
     let mut paths = std::env::split_paths(&std::env::var("PATH").expect("failed to get PATH"))
         .collect::<Vec<_>>();
     paths.insert(0, dir.to_owned());
-    std::env::set_var(
-        "PATH",
-        std::env::join_paths(paths).expect("failed to join paths"),
-    );
+    unsafe {
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths(paths).expect("failed to join paths"),
+        )
+    };
 }
 
 // use cargo manifest dir
@@ -83,8 +85,7 @@ fn test_on_example_ladfile() {
         let book_file = book_dir.join(relative_path);
         assert!(
             book_files.contains(&book_file),
-            "File not found: {:?}",
-            book_file
+            "File not found: {book_file:?}"
         );
         let expected_content =
             std::fs::read_to_string(&expected_file).expect("failed to read file");

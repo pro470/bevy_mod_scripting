@@ -6,18 +6,20 @@ use crate::asset::Language;
 use crate::bindings::function::arg_meta::ArgMeta;
 use crate::docgen::info::{FunctionInfo, GetFunctionInfo};
 use crate::{
+    ScriptValue,
     bindings::{ThreadWorldContainer, WorldContainer, WorldGuard},
     error::InteropError,
-    ScriptValue,
 };
-use bevy::prelude::{Reflect, Resource};
-use bevy::utils::hashbrown::HashMap;
+use bevy_ecs::prelude::Resource;
+use bevy_platform::collections::HashMap;
+use bevy_reflect::Reflect;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+
 #[diagnostic::on_unimplemented(
     message = "This function does not fulfil the requirements to be a script callable function. All arguments must implement the ScriptArgument trait and all return values must implement the ScriptReturn trait",
     note = "If you're trying to return a non-primitive type, you might need to use Val<T> Ref<T> or Mut<T> wrappers"
@@ -253,12 +255,12 @@ pub struct ScriptFunctionRegistryArc(pub Arc<RwLock<ScriptFunctionRegistry>>);
 #[profiling::all_functions]
 impl ScriptFunctionRegistryArc {
     /// claim a read lock on the registry
-    pub fn read(&self) -> RwLockReadGuard<ScriptFunctionRegistry> {
+    pub fn read(&self) -> RwLockReadGuard<'_, ScriptFunctionRegistry> {
         self.0.read()
     }
 
     /// claim a write lock on the registry
-    pub fn write(&mut self) -> RwLockWriteGuard<ScriptFunctionRegistry> {
+    pub fn write(&mut self) -> RwLockWriteGuard<'_, ScriptFunctionRegistry> {
         self.0.write()
     }
 }
@@ -463,7 +465,7 @@ impl ScriptFunctionRegistry {
                 if i == 0 {
                     self.get_function(namespace, name.clone())
                 } else {
-                    let name: Cow<'static, str> = format!("{}-{i}", name).into();
+                    let name: Cow<'static, str> = format!("{name}-{i}").into();
                     self.get_function(namespace, name)
                 }
             })
@@ -622,14 +624,15 @@ macro_rules! impl_script_function {
     };
 }
 
-bevy::utils::all_tuples!(impl_script_function, 0, 13, T);
+variadics_please::all_tuples!(impl_script_function, 0, 13, T);
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use bevy_ecs::{prelude::Component, world::World};
 
     fn with_local_world<F: Fn()>(f: F) {
-        let mut world = bevy::prelude::World::default();
+        let mut world = World::default();
         WorldGuard::with_static_guard(&mut world, |world| {
             ThreadWorldContainer.set_world(world).unwrap();
             f()
@@ -693,7 +696,7 @@ mod test {
 
     #[test]
     fn test_interrupted_call_releases_access_scope() {
-        #[derive(bevy::prelude::Component, Reflect)]
+        #[derive(Component, Reflect)]
         struct Comp;
 
         let fn_ = |_a: crate::bindings::function::from::Mut<Comp>| 0usize;

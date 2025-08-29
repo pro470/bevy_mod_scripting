@@ -1,12 +1,16 @@
-use std::alloc::Layout;
-use std::collections::HashMap;
+use std::{alloc::Layout, collections::HashMap};
 
-use bevy::asset::AssetPlugin;
-use bevy::diagnostic::DiagnosticsPlugin;
-use bevy::ecs::{component::*, world::World};
-use bevy::log::LogPlugin;
-use bevy::prelude::*;
-use bevy::reflect::*;
+use bevy_app::{App, ScheduleRunnerPlugin, TaskPoolPlugin};
+use bevy_diagnostic::FrameCountPlugin;
+use bevy_log::LogPlugin;
+use bevy_time::TimePlugin;
+
+use ::{
+    bevy_asset::AssetPlugin,
+    bevy_diagnostic::DiagnosticsPlugin,
+    bevy_ecs::{component::*, prelude::*, world::World},
+    bevy_reflect::{prelude::*, *},
+};
 
 /// Test component with Reflect and ReflectComponent registered
 #[derive(Component, Reflect, PartialEq, Eq, Debug)]
@@ -312,6 +316,8 @@ fn init_world<F: FnOnce(&mut World, &mut TypeRegistry)>(world: &mut World, init:
                 StorageType::Table,
                 Layout::new::<usize>(),
                 None,
+                true,
+                ComponentCloneBehavior::Default,
             ))
         };
     }
@@ -344,9 +350,11 @@ pub fn setup_integration_test<F: FnOnce(&mut World, &mut TypeRegistry)>(init: F)
         std::env::var("RUST_LOG").unwrap_or_else(|_| "bevy_mod_scripting_core=debug".to_string());
 
     app.add_plugins((
-        MinimalPlugins,
+        TaskPoolPlugin::default(),
+        FrameCountPlugin,
+        TimePlugin,
+        ScheduleRunnerPlugin::default(),
         AssetPlugin::default(),
-        HierarchyPlugin,
         DiagnosticsPlugin,
         LogPlugin {
             filter: log_level,

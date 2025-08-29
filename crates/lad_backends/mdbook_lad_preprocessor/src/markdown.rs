@@ -34,7 +34,7 @@ pub(crate) fn markdown_substring(markdown: &str, length: usize) -> String {
 
     let trimmed = markdown[..end].to_string();
     // append ...
-    format!("{}...", trimmed)
+    format!("{trimmed}...")
 }
 
 /// Escapes Markdown reserved characters in the given text.
@@ -208,7 +208,7 @@ impl IntoMarkdown for Markdown {
             Markdown::CodeBlock { language, code } => {
                 // Do not escape code blocks
                 let lang = language.as_deref().unwrap_or("");
-                builder.append(&format!("```{}\n{}\n```", lang, code));
+                builder.append(&format!("```{lang}\n{code}\n```"));
             }
             Markdown::List { ordered, items } => {
                 items.iter().enumerate().for_each(|(i, item)| {
@@ -233,7 +233,7 @@ impl IntoMarkdown for Markdown {
             Markdown::Quote(text) => {
                 let quote_output = text
                     .lines()
-                    .map(|line| format!("> {}", line))
+                    .map(|line| format!("> {line}"))
                     .collect::<Vec<String>>()
                     .join("\n");
                 builder.append(&quote_output);
@@ -404,11 +404,7 @@ impl MarkdownBuilder {
 
     fn separator(&self) -> &'static str {
         if self.inline {
-            if self.tight_inline {
-                ""
-            } else {
-                " "
-            }
+            if self.tight_inline { "" } else { " " }
         } else {
             "\n\n"
         }
@@ -783,8 +779,7 @@ mod tests {
             assert_eq!(
                 expected,
                 markdown_substring(input, len),
-                "Failed for input: {}",
-                input
+                "Failed for input: {input}"
             );
         }
     }

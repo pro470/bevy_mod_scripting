@@ -2,7 +2,7 @@
 
 use crate::bindings::function::arg_meta::ArgMeta;
 use crate::bindings::function::namespace::Namespace;
-use bevy::reflect::Reflect;
+use bevy_reflect::Reflect;
 use std::{any::TypeId, borrow::Cow};
 
 use super::typed_through::{ThroughTypeInfo, TypedThrough};
@@ -191,7 +191,7 @@ macro_rules! impl_documentable {
     };
 }
 
-bevy::utils::all_tuples!(impl_documentable, 0, 13, T);
+variadics_please::all_tuples!(impl_documentable, 0, 13, T);
 
 #[cfg(test)]
 mod test {

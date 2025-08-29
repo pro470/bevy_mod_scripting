@@ -3,14 +3,16 @@
 use crate::reflection_extensions::{FakeType, TypeIdExtensions};
 
 use crate::bindings::{
-    access_map::ReflectAccessId, script_value::ScriptValue, ReflectAllocationId, ReflectBase,
-    ReflectBaseType, ReflectReference, WorldGuard,
+    ReflectAllocationId, ReflectBase, ReflectBaseType, ReflectReference, WorldGuard,
+    access_map::ReflectAccessId, script_value::ScriptValue,
 };
-use bevy::{
-    ecs::component::ComponentId,
-    prelude::World,
-    reflect::{PartialReflect, ReflectRef},
+use ::{
+    bevy_ecs::component::ComponentId,
+    bevy_reflect::{PartialReflect, ReflectRef},
 };
+use bevy_ecs::world::World;
+use bevy_platform::collections::HashMap;
+use bevy_reflect::VariantType;
 use itertools::Itertools;
 use std::{
     any::{Any, TypeId},
@@ -90,7 +92,7 @@ impl ReflectReferencePrinter {
 
             if let Some(tail_type_id) = tail_type_id {
                 let type_path = tail_type_id.display_with_world(world);
-                pretty_path.push_str(&format!(" -> {}", type_path));
+                pretty_path.push_str(&format!(" -> {type_path}"));
             }
         } else {
             Self::pretty_print_base(&self.reference.base, None, &mut pretty_path);
@@ -111,7 +113,7 @@ impl ReflectReferencePrinter {
                         self.pretty_print_value_inner(r, &mut output);
                     })
                     .unwrap_or_else(|e| {
-                        output.push_str(&format!("<Error in printing: {}>", e));
+                        output.push_str(&format!("<Error in printing: {e}>"));
                     });
             }
             None => {
@@ -131,12 +133,12 @@ impl ReflectReferencePrinter {
         };
 
         let base_kind = match base.base_id {
-            ReflectBase::Component(e, _) => format!("Component on entity {}", e),
+            ReflectBase::Component(e, _) => format!("Component on entity {e}"),
             ReflectBase::Resource(_) => "Resource".to_owned(),
-            ReflectBase::Owned(ref id) => format!("Allocation({})", id),
+            ReflectBase::Owned(ref id) => format!("Allocation({id})"),
         };
 
-        out.push_str(&format!("{}({})", base_kind, type_path));
+        out.push_str(&format!("{base_kind}({type_path})"));
     }
 
     /// Pretty prints a value of an opaque type.
@@ -237,7 +239,7 @@ impl ReflectReferencePrinter {
 
     fn pretty_print_value_inner(&self, v: &dyn PartialReflect, output: &mut String) {
         match v.reflect_ref() {
-            bevy::reflect::ReflectRef::Struct(s) => {
+            ReflectRef::Struct(s) => {
                 let field_names = s
                     .get_represented_struct_info()
                     .map(|info| info.field_names())
@@ -301,7 +303,7 @@ impl ReflectReferencePrinter {
             ReflectRef::Enum(e) => {
                 output.push_str(&e.variant_path());
                 let bracket_type = match e.variant_type() {
-                    bevy::reflect::VariantType::Tuple => BracketType::Round,
+                    VariantType::Tuple => BracketType::Round,
                     _ => BracketType::Curly,
                 };
                 let key_vals = e.iter_fields().map(|v| {
@@ -317,7 +319,7 @@ impl ReflectReferencePrinter {
             // for function_reflection from bevy or other feature gated things
             #[allow(unreachable_patterns)]
             _ => {
-                output.push_str(&format!("{:?}", v));
+                output.push_str(&format!("{v:?}"));
             }
         }
     }
@@ -354,7 +356,7 @@ pub trait AsAny: 'static {
 }
 
 #[doc(hidden)]
-impl<T: DisplayWithWorld + 'static> AsAny for T {
+impl<T: 'static> AsAny for T {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -414,7 +416,7 @@ impl DisplayWithWorld for ComponentId {
             .map(|info| info.name());
 
         match component_name {
-            Some(n) => format!("ComponentOrResource({})", n),
+            Some(n) => format!("ComponentOrResource({n})"),
             None => "ComponentOrResource(<Unknown>)".to_owned(),
         }
     }
@@ -450,14 +452,14 @@ impl DisplayWithWorld for ReflectAccessId {
                     if let Some(allocation) = allocator.get(&allocation_id) {
                         let ptr = allocation.get_ptr();
                         let val = unsafe { &*ptr };
-                        let o = format!("Allocation({:?})", val);
+                        let o = format!("Allocation({val:?})");
                         unsafe { world.release_access(raid) };
                         o
                     } else {
-                        format!("Allocation({})", allocation_id)
+                        format!("Allocation({allocation_id})")
                     }
                 } else {
-                    format!("Allocation({})", allocation_id)
+                    format!("Allocation({allocation_id})")
                 }
             }
             super::access_map::ReflectAccessKind::Global => "Global".to_owned(),
@@ -491,7 +493,7 @@ impl DisplayWithWorld for TypeId {
     }
 
     fn display_without_world(&self) -> String {
-        format!("{:?}", self)
+        format!("{self:?}")
     }
 }
 #[profiling::all_functions]
@@ -603,63 +605,74 @@ impl DisplayWithWorld for String {
         self.to_string()
     }
 }
-#[profiling::all_functions]
-impl<K: DisplayWithWorld + 'static, V: DisplayWithWorld + 'static> DisplayWithWorld
-    for std::collections::HashMap<K, V>
-{
-    fn display_with_world(&self, world: WorldGuard) -> String {
-        let mut string = String::new();
-        BracketType::Curly.surrounded(&mut string, |string| {
-            for (i, (k, v)) in self.iter().enumerate() {
-                string.push_str(&k.display_with_world(world.clone()));
-                string.push_str(": ");
-                string.push_str(&v.display_with_world(world.clone()));
-                if i != self.len() - 1 {
-                    string.push_str(", ");
-                }
-            }
-        });
-        string
-    }
 
-    fn display_value_with_world(&self, world: WorldGuard) -> String {
-        let mut string = String::new();
-        BracketType::Curly.surrounded(&mut string, |string| {
-            for (i, (k, v)) in self.iter().enumerate() {
-                string.push_str(&k.display_value_with_world(world.clone()));
-                string.push_str(": ");
-                string.push_str(&v.display_value_with_world(world.clone()));
-                if i != self.len() - 1 {
-                    string.push_str(", ");
-                }
+/// Implements DisplayWithWorld for a HashMap-like type that has key-value pairs
+/// and supports iter() and len() methods.
+macro_rules! impl_display_with_world_for_map {
+    ($map_type:path) => {
+        #[profiling::all_functions]
+        impl<K: DisplayWithWorld + 'static, V: DisplayWithWorld + 'static> DisplayWithWorld
+            for $map_type
+        {
+            fn display_with_world(&self, world: WorldGuard) -> String {
+                let mut string = String::new();
+                BracketType::Curly.surrounded(&mut string, |string| {
+                    for (i, (k, v)) in self.iter().enumerate() {
+                        string.push_str(&k.display_with_world(world.clone()));
+                        string.push_str(": ");
+                        string.push_str(&v.display_with_world(world.clone()));
+                        if i != self.len() - 1 {
+                            string.push_str(", ");
+                        }
+                    }
+                });
+                string
             }
-        });
-        string
-    }
 
-    fn display_without_world(&self) -> String {
-        let mut string = String::new();
-        BracketType::Curly.surrounded(&mut string, |string| {
-            for (i, (k, v)) in self.iter().enumerate() {
-                string.push_str(&k.display_without_world());
-                string.push_str(": ");
-                string.push_str(&v.display_without_world());
-                if i != self.len() - 1 {
-                    string.push_str(", ");
-                }
+            fn display_value_with_world(&self, world: WorldGuard) -> String {
+                let mut string = String::new();
+                BracketType::Curly.surrounded(&mut string, |string| {
+                    for (i, (k, v)) in self.iter().enumerate() {
+                        string.push_str(&k.display_value_with_world(world.clone()));
+                        string.push_str(": ");
+                        string.push_str(&v.display_value_with_world(world.clone()));
+                        if i != self.len() - 1 {
+                            string.push_str(", ");
+                        }
+                    }
+                });
+                string
             }
-        });
-        string
-    }
+
+            fn display_without_world(&self) -> String {
+                let mut string = String::new();
+                BracketType::Curly.surrounded(&mut string, |string| {
+                    for (i, (k, v)) in self.iter().enumerate() {
+                        string.push_str(&k.display_without_world());
+                        string.push_str(": ");
+                        string.push_str(&v.display_without_world());
+                        if i != self.len() - 1 {
+                            string.push_str(", ");
+                        }
+                    }
+                });
+                string
+            }
+        }
+    };
 }
+
+impl_display_with_world_for_map!(HashMap<K, V>);
+impl_display_with_world_for_map!(std::collections::HashMap<K, V>);
 
 #[cfg(test)]
 mod test {
-    use bevy::{prelude::AppTypeRegistry, reflect::Reflect};
+    use bevy_ecs::reflect::AppTypeRegistry;
+    use bevy_reflect::Reflect;
 
     use crate::bindings::{
-        function::script_function::AppScriptFunctionRegistry, AppReflectAllocator,
-        ReflectAllocationId,
+        AppReflectAllocator, ReflectAllocationId,
+        function::script_function::AppScriptFunctionRegistry,
     };
 
     use super::*;
@@ -687,7 +700,7 @@ mod test {
         let type_id = TypeId::of::<usize>();
         assert_eq!(type_id.display_with_world(world.clone()), "usize");
         assert_eq!(type_id.display_value_with_world(world.clone()), "usize");
-        assert_eq!(type_id.display_without_world(), format!("{:?}", type_id));
+        assert_eq!(type_id.display_without_world(), format!("{type_id:?}"));
 
         let type_id = TypeId::of::<FakeType>();
         assert_eq!(type_id.display_with_world(world.clone()), "Unknown Type");
@@ -695,7 +708,7 @@ mod test {
             type_id.display_value_with_world(world.clone()),
             "Unknown Type"
         );
-        assert_eq!(type_id.display_without_world(), format!("{:?}", type_id));
+        assert_eq!(type_id.display_without_world(), format!("{type_id:?}"));
     }
 
     #[test]
@@ -729,7 +742,7 @@ mod test {
                 type_id,
             }
             .display_without_world(),
-            format!("Allocation(0)({:?})", type_id)
+            format!("Allocation(0)({type_id:?})")
         );
     }
 
@@ -763,7 +776,7 @@ mod test {
 
         assert_eq!(
             reflect_reference.display_without_world(),
-            format!("<Reference to Allocation({id})({:?})>", type_id)
+            format!("<Reference to Allocation({id})({type_id:?})>")
         );
     }
 
@@ -772,7 +785,7 @@ mod test {
         let mut world = setup_world();
         let world = WorldGuard::new_exclusive(&mut world);
 
-        let mut map = std::collections::HashMap::new();
+        let mut map = HashMap::new();
         map.insert("hello".to_owned(), ScriptValue::Bool(true));
 
         assert_eq!(map.display_with_world(world.clone()), "{hello: true}");

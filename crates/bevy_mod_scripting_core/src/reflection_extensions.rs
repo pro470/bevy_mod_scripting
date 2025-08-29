@@ -1,14 +1,17 @@
 //! Various utility functions for working with reflection types.
 
-use crate::{
-    bindings::{ReflectReference, WorldGuard},
-    error::InteropError,
-};
-use bevy::reflect::{PartialReflect, Reflect, ReflectFromReflect, ReflectMut, TypeInfo};
 use std::{
     any::{Any, TypeId},
     cmp::max,
 };
+
+use bevy_reflect::{PartialReflect, Reflect, ReflectFromReflect, ReflectMut, ReflectRef, TypeInfo};
+
+use crate::{
+    bindings::{ReflectReference, WorldGuard},
+    error::InteropError,
+};
+
 /// Extension trait for [`PartialReflect`] providing additional functionality for working with specific types.
 pub trait PartialReflectExt {
     /// Try to get a reference to the given key in an underyling map, if the type is a map.
@@ -30,7 +33,7 @@ pub trait PartialReflectExt {
     fn from_reflect_or_clone(
         reflect: &dyn PartialReflect,
         world: WorldGuard,
-    ) -> Box<dyn PartialReflect>;
+    ) -> Result<Box<dyn PartialReflect>, InteropError>;
 
     /// Allocate a new boxed reflect reference from a boxed reflect.
     fn allocate(boxed: Box<dyn Reflect>, world: WorldGuard) -> ReflectReference;
@@ -137,13 +140,13 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
     }
 
     fn as_option(&self) -> Result<Option<&dyn PartialReflect>, InteropError> {
-        if let bevy::reflect::ReflectRef::Enum(e) = self.reflect_ref() {
-            if e.is_type(Some("core"), "Option") {
-                if let Some(field) = e.field_at(0) {
-                    return Ok(Some(field));
-                } else {
-                    return Ok(None);
-                }
+        if let ReflectRef::Enum(e) = self.reflect_ref()
+            && e.is_type(Some("core"), "Option")
+        {
+            if let Some(field) = e.field_at(0) {
+                return Ok(Some(field));
+            } else {
+                return Ok(None);
             }
         }
 
@@ -156,7 +159,7 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
     fn as_option_mut(&mut self) -> Result<Option<&mut dyn PartialReflect>, InteropError> {
         let type_info = self.get_represented_type_info().map(|ti| ti.type_path());
         match self.reflect_mut() {
-            bevy::reflect::ReflectMut::Enum(e) => {
+            ReflectMut::Enum(e) => {
                 if let Some(field) = e.field_at_mut(0) {
                     Ok(Some(field))
                 } else {
@@ -171,7 +174,7 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
     }
 
     fn as_list(&self) -> Result<impl Iterator<Item = &dyn PartialReflect>, InteropError> {
-        if let bevy::reflect::ReflectRef::List(l) = self.reflect_ref() {
+        if let ReflectRef::List(l) = self.reflect_ref() {
             Ok(l.iter())
         } else {
             Err(InteropError::string_type_mismatch(
@@ -251,15 +254,15 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
         value: Box<dyn PartialReflect>,
     ) -> Result<(), InteropError> {
         match self.reflect_mut() {
-            bevy::reflect::ReflectMut::List(l) => {
+            ReflectMut::List(l) => {
                 l.insert(key.as_usize()?, value);
                 Ok(())
             }
-            bevy::reflect::ReflectMut::Map(m) => {
+            ReflectMut::Map(m) => {
                 m.insert_boxed(key, value);
                 Ok(())
             }
-            bevy::reflect::ReflectMut::Set(s) => {
+            ReflectMut::Set(s) => {
                 s.insert_boxed(value);
                 Ok(())
             }
@@ -273,11 +276,11 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
 
     fn try_push_boxed(&mut self, value: Box<dyn PartialReflect>) -> Result<(), InteropError> {
         match self.reflect_mut() {
-            bevy::reflect::ReflectMut::List(l) => {
+            ReflectMut::List(l) => {
                 l.push(value);
                 Ok(())
             }
-            bevy::reflect::ReflectMut::Set(s) => {
+            ReflectMut::Set(s) => {
                 s.insert_boxed(value);
                 Ok(())
             }
@@ -300,15 +303,15 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
 
     fn try_clear(&mut self) -> Result<(), InteropError> {
         match self.reflect_mut() {
-            bevy::reflect::ReflectMut::List(l) => {
+            ReflectMut::List(l) => {
                 let _ = l.drain();
                 Ok(())
             }
-            bevy::reflect::ReflectMut::Map(m) => {
+            ReflectMut::Map(m) => {
                 let _ = m.drain();
                 Ok(())
             }
-            bevy::reflect::ReflectMut::Set(s) => {
+            ReflectMut::Set(s) => {
                 let _ = s.drain();
                 Ok(())
             }
@@ -325,7 +328,7 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
         key: &dyn PartialReflect,
     ) -> Result<Option<&dyn PartialReflect>, InteropError> {
         match self.reflect_ref() {
-            bevy::reflect::ReflectRef::Map(m) => Ok(m.get(key)),
+            ReflectRef::Map(m) => Ok(m.get(key)),
             _ => Err(InteropError::unsupported_operation(
                 self.get_represented_type_info().map(|ti| ti.type_id()),
                 None,
@@ -336,7 +339,7 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
 
     fn try_pop_boxed(&mut self) -> Result<Box<dyn PartialReflect>, InteropError> {
         match self.reflect_mut() {
-            bevy::reflect::ReflectMut::List(l) => l.pop().ok_or_else(|| {
+            ReflectMut::List(l) => l.pop().ok_or_else(|| {
                 InteropError::unsupported_operation(
                     self.get_represented_type_info().map(|ti| ti.type_id()),
                     None,
@@ -356,9 +359,9 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
         key: Box<dyn PartialReflect>,
     ) -> Result<Option<Box<dyn PartialReflect>>, InteropError> {
         match self.reflect_mut() {
-            bevy::reflect::ReflectMut::List(l) => Ok(Some(l.remove(key.as_usize()?))),
-            bevy::reflect::ReflectMut::Map(m) => Ok(m.remove(key.as_partial_reflect())),
-            bevy::reflect::ReflectMut::Set(s) => {
+            ReflectMut::List(l) => Ok(Some(l.remove(key.as_usize()?))),
+            ReflectMut::Map(m) => Ok(m.remove(key.as_partial_reflect())),
+            ReflectMut::Set(s) => {
                 let removed = s.remove(key.as_partial_reflect());
                 Ok(removed.then_some(key))
             }
@@ -372,10 +375,10 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
 
     fn element_type_id(&self) -> Option<TypeId> {
         let elem: TypeId = match self.get_represented_type_info()? {
-            bevy::reflect::TypeInfo::List(list_info) => list_info.item_ty().id(),
-            bevy::reflect::TypeInfo::Array(array_info) => array_info.item_ty().id(),
-            bevy::reflect::TypeInfo::Map(map_info) => map_info.value_ty().id(),
-            bevy::reflect::TypeInfo::Set(set_info) => set_info.value_ty().id(),
+            TypeInfo::List(list_info) => list_info.item_ty().id(),
+            TypeInfo::Array(array_info) => array_info.item_ty().id(),
+            TypeInfo::Map(map_info) => map_info.value_ty().id(),
+            TypeInfo::Set(set_info) => set_info.value_ty().id(),
             _ => return None,
         };
         Some(elem)
@@ -383,10 +386,8 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
 
     fn key_type_id(&self) -> Option<TypeId> {
         let key: TypeId = match self.get_represented_type_info()? {
-            bevy::reflect::TypeInfo::Map(map_info) => map_info.key_ty().id(),
-            bevy::reflect::TypeInfo::List(_) | bevy::reflect::TypeInfo::Array(_) => {
-                TypeId::of::<usize>()
-            }
+            TypeInfo::Map(map_info) => map_info.key_ty().id(),
+            TypeInfo::List(_) | TypeInfo::Array(_) => TypeId::of::<usize>(),
             _ => return None,
         };
         Some(key)
@@ -424,11 +425,19 @@ impl<T: PartialReflect + ?Sized> PartialReflectExt for T {
     fn from_reflect_or_clone(
         reflect: &dyn PartialReflect,
         world: WorldGuard,
-    ) -> Box<dyn PartialReflect> {
+    ) -> Result<Box<dyn PartialReflect>, InteropError> {
         // try from reflect
         match <dyn PartialReflect>::from_reflect(reflect, world.clone()) {
-            Ok(v) => v.into_partial_reflect(),
-            Err(_) => reflect.clone_value(),
+            Ok(v) => Ok(v.into_partial_reflect()),
+            Err(_) => reflect
+                .reflect_clone()
+                .map(|v| v.into_partial_reflect())
+                .map_err(|e| {
+                    InteropError::failed_from_reflect(
+                        reflect.get_represented_type_info().map(|ti| ti.type_id()),
+                        e.to_string(),
+                    )
+                }),
         }
     }
 
@@ -495,7 +504,8 @@ impl TypeInfoExtensions for TypeInfo {
 
 #[cfg(test)]
 mod test {
-    use bevy::reflect::{DynamicMap, Map};
+    use bevy_platform::collections::HashMap;
+    use bevy_reflect::{DynamicMap, Map};
 
     use super::*;
 
@@ -640,7 +650,7 @@ mod test {
 
     #[test]
     fn test_try_insert_map() {
-        let mut map = std::collections::HashMap::<i32, i32>::default();
+        let mut map = HashMap::<i32, i32>::default();
         let value = 4;
         let value_ref: Box<dyn PartialReflect> = Box::new(value);
         map.insert(1, 2);
@@ -664,13 +674,12 @@ mod test {
 
     #[test]
     fn test_try_insert_dynamic_map_into_map_of_maps() {
-        let mut map =
-            std::collections::HashMap::<i32, std::collections::HashMap<i32, i32>>::default();
+        let mut map = HashMap::<i32, HashMap<i32, i32>>::default();
         let value = DynamicMap::from_iter(vec![(1, 2), (2, 3), (3, 4)]);
-        let value_ref: Box<dyn PartialReflect> = Box::new(value.clone_dynamic());
-        map.insert(1, std::collections::HashMap::<i32, i32>::default());
-        map.insert(2, std::collections::HashMap::<i32, i32>::default());
-        map.insert(3, std::collections::HashMap::<i32, i32>::default());
+        let value_ref: Box<dyn PartialReflect> = Box::new(value.to_dynamic_map());
+        map.insert(1, HashMap::<i32, i32>::default());
+        map.insert(2, HashMap::<i32, i32>::default());
+        map.insert(3, HashMap::<i32, i32>::default());
         map.try_insert_boxed(Box::new(1), value_ref).unwrap();
         assert!(value.reflect_partial_eq(&map[&1]).unwrap());
     }

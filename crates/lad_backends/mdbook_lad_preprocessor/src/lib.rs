@@ -1,12 +1,13 @@
 //! The library crate for the mdbook LAD preprocessor.
 #![allow(missing_docs)]
 
+use std::sync::OnceLock;
+
 use mdbook::{
     errors::Error,
     preprocess::{Preprocessor, PreprocessorContext},
 };
 use sections::{Section, SectionData};
-use std::sync::OnceLock;
 mod argument_visitor;
 mod markdown;
 mod sections;
@@ -60,7 +61,7 @@ impl LADPreprocessor {
             .unwrap_or_default()
             .with_extension("");
 
-        log::debug!("Parent path: {:?}", parent_path);
+        log::debug!("Parent path: {parent_path:?}");
 
         let new_chapter = Section::new(
             parent_path,
@@ -91,7 +92,7 @@ impl Preprocessor for LADPreprocessor {
         let mut errors = Vec::new();
         let options = Options::from(context);
 
-        log::debug!("Options: {:?}", options);
+        log::debug!("Options: {options:?}");
         OPTIONS
             .set(options)
             .map_err(|_| mdbook::errors::Error::msg("could not initialize options"))?;
@@ -105,19 +106,19 @@ impl Preprocessor for LADPreprocessor {
                     .iter()
                     .enumerate()
                     .filter_map(|(idx, item)| {
-                        if let mdbook::BookItem::Chapter(chapter) = item {
-                            if LADPreprocessor::is_lad_file(chapter) {
-                                match LADPreprocessor::process_lad_chapter(
-                                    context,
-                                    chapter,
-                                    Some(parent),
-                                    idx,
-                                ) {
-                                    Ok(new_chapter) => return Some((idx, new_chapter)),
-                                    Err(e) => {
-                                        errors.push(e);
-                                        return None;
-                                    }
+                        if let mdbook::BookItem::Chapter(chapter) = item
+                            && LADPreprocessor::is_lad_file(chapter)
+                        {
+                            match LADPreprocessor::process_lad_chapter(
+                                context,
+                                chapter,
+                                Some(parent),
+                                idx,
+                            ) {
+                                Ok(new_chapter) => return Some((idx, new_chapter)),
+                                Err(e) => {
+                                    errors.push(e);
+                                    return None;
                                 }
                             }
                         }
@@ -168,8 +169,8 @@ impl Preprocessor for LADPreprocessor {
 
         if !errors.is_empty() {
             // return on first error
-            for error in errors {
-                log::error!("{}", error);
+            if let Some(error) = errors.into_iter().next() {
+                log::error!("{error}");
                 Err(error)?;
             }
         }

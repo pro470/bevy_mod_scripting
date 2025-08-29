@@ -1,13 +1,13 @@
 //! Implementations of the [`IntoScript`] trait for various types.
 
-use bevy::reflect::Reflect;
-use std::{borrow::Cow, collections::HashMap, ffi::OsString, path::PathBuf};
-
 use super::{DynamicScriptFunction, DynamicScriptFunctionMut, Union, Val};
 use crate::{
     bindings::{ReflectReference, ScriptValue, WorldGuard},
     error::InteropError,
 };
+use bevy_platform::collections::HashMap;
+use bevy_reflect::Reflect;
+use std::{borrow::Cow, ffi::OsString, path::PathBuf};
 
 /// Converts a value into a [`ScriptValue`].
 pub trait IntoScript {
@@ -180,6 +180,17 @@ impl<V: IntoScript> IntoScript for HashMap<String, V> {
 }
 
 #[profiling::all_functions]
+impl<V: IntoScript> IntoScript for std::collections::HashMap<String, V> {
+    fn into_script(self, world: WorldGuard) -> Result<ScriptValue, InteropError> {
+        let mut map = HashMap::new();
+        for (key, value) in self {
+            map.insert(key, value.into_script(world.clone())?);
+        }
+        Ok(ScriptValue::Map(map))
+    }
+}
+
+#[profiling::all_functions]
 impl IntoScript for InteropError {
     fn into_script(self, _world: WorldGuard) -> Result<ScriptValue, InteropError> {
         Ok(ScriptValue::Error(self))
@@ -199,4 +210,4 @@ macro_rules! impl_into_script_tuple {
 }
 }
 
-bevy::utils::all_tuples!(impl_into_script_tuple, 1, 14, T);
+variadics_please::all_tuples!(impl_into_script_tuple, 1, 14, T);

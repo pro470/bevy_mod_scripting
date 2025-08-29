@@ -6,6 +6,9 @@
 //! we need wrapper types which have owned and ref variants.
 
 use super::{
+    AppReflectAllocator, AppScriptComponentRegistry, ReflectBase, ReflectBaseType,
+    ReflectReference, ScriptComponentRegistration, ScriptResourceRegistration,
+    ScriptTypeRegistration, Union,
     access_map::{
         AccessCount, AccessMapKey, AnyAccessMap, DynamicSystemMeta, ReflectAccessId,
         ReflectAccessKind, SubsetAccessMap,
@@ -17,42 +20,50 @@ use super::{
     pretty_print::DisplayWithWorld,
     schedule::AppScheduleRegistry,
     script_value::ScriptValue,
-    with_global_access, AppReflectAllocator, AppScriptComponentRegistry, ReflectBase,
-    ReflectBaseType, ReflectReference, ScriptComponentRegistration, ScriptResourceRegistration,
-    ScriptTypeRegistration, Union,
+    with_global_access,
 };
 use crate::{
+    asset::ScriptAsset,
     bindings::{
         function::{from::FromScript, from_ref::FromScriptRef},
         with_access_read, with_access_write,
     },
+    commands::AddStaticScript,
     error::InteropError,
     reflection_extensions::PartialReflectExt,
+    script::{ScriptAttachment, ScriptComponent},
 };
-use bevy::{
-    app::AppExit,
-    ecs::{
+use ::{
+    bevy_app::AppExit,
+    bevy_asset::{AssetServer, Handle, LoadState},
+    bevy_ecs::{
         component::{Component, ComponentId},
         entity::Entity,
+        prelude::Resource,
         reflect::{AppTypeRegistry, ReflectFromWorld, ReflectResource},
-        system::{Commands, Resource},
-        world::{unsafe_world_cell::UnsafeWorldCell, CommandQueue, Mut, World},
+        system::Commands,
+        world::{CommandQueue, Mut, World, unsafe_world_cell::UnsafeWorldCell},
     },
-    hierarchy::{BuildChildren, Children, DespawnRecursiveExt, Parent},
-    reflect::{
-        std_traits::ReflectDefault, DynamicEnum, DynamicStruct, DynamicTuple, DynamicTupleStruct,
-        DynamicVariant, ParsedPath, PartialReflect, TypeRegistryArc,
+    bevy_reflect::{
+        DynamicEnum, DynamicStruct, DynamicTuple, DynamicTupleStruct, DynamicVariant, ParsedPath,
+        PartialReflect, TypeRegistryArc, std_traits::ReflectDefault,
     },
 };
+use bevy_ecs::{
+    component::Mutable,
+    hierarchy::{ChildOf, Children},
+    system::Command,
+};
+use bevy_platform::collections::HashMap;
+use bevy_reflect::{TypeInfo, VariantInfo};
 use bevy_system_reflection::ReflectSchedule;
 use std::{
     any::TypeId,
     borrow::Cow,
     cell::RefCell,
-    collections::HashMap,
     fmt::Debug,
     rc::Rc,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{Arc, atomic::AtomicBool},
 };
 
 /// Prefer to directly using [`WorldAccessGuard`]. If the underlying type changes, this alias will be updated.
@@ -226,6 +237,13 @@ impl<'w> WorldAccessGuard<'w> {
             }),
             invalid: Rc::new(false.into()),
         }
+    }
+
+    /// Queues a command to the world, which will be executed later.
+    pub(crate) fn queue(&self, command: impl Command) -> Result<(), InteropError> {
+        self.with_global_access(|w| {
+            w.commands().queue(command);
+        })
     }
 
     /// Runs a closure within an isolated access scope, releasing leftover accesses, should only be used in a single-threaded context.
@@ -446,7 +464,9 @@ impl<'w> WorldAccessGuard<'w> {
             format!("Could not access component: {}", std::any::type_name::<T>()),
             {
                 // Safety: we have acquired access for the duration of the closure
-                f(unsafe { cell.get_entity(entity).and_then(|e| e.get::<T>()) })
+                f(unsafe { cell.get_entity(entity).map(|e| e.get::<T>()) }
+                    .ok()
+                    .unwrap_or(None))
             }
         )
     }
@@ -454,7 +474,7 @@ impl<'w> WorldAccessGuard<'w> {
     /// Safely accesses the component by claiming and releasing access to it.
     pub fn with_component_mut<F, T, O>(&self, entity: Entity, f: F) -> Result<O, InteropError>
     where
-        T: Component,
+        T: Component<Mutability = Mutable>,
         F: FnOnce(Option<Mut<T>>) -> O,
     {
         let cell = self.as_unsafe_world_cell()?;
@@ -466,7 +486,9 @@ impl<'w> WorldAccessGuard<'w> {
             format!("Could not access component: {}", std::any::type_name::<T>()),
             {
                 // Safety: we have acquired access for the duration of the closure
-                f(unsafe { cell.get_entity(entity).and_then(|e| e.get_mut::<T>()) })
+                f(unsafe { cell.get_entity(entity).map(|e| e.get_mut::<T>()) }
+                    .ok()
+                    .unwrap_or(None))
             }
         )
     }
@@ -478,7 +500,7 @@ impl<'w> WorldAccessGuard<'w> {
         f: F,
     ) -> Result<O, InteropError>
     where
-        T: Component + Default,
+        T: Component<Mutability = Mutable> + Default,
         F: FnOnce(&mut T) -> O,
     {
         self.with_global_access(|world| match world.get_mut::<T>(entity) {
@@ -536,7 +558,7 @@ impl<'w> WorldAccessGuard<'w> {
     /// checks if a given entity exists and is valid
     pub fn is_valid_entity(&self, entity: Entity) -> Result<bool, InteropError> {
         let cell = self.as_unsafe_world_cell()?;
-        Ok(cell.get_entity(entity).is_some() && entity.index() != 0)
+        Ok(cell.get_entity(entity).is_ok() && entity.index() != 0)
     }
 
     /// Tries to call a fitting overload of the function with the given name and in the type id's namespace based on the arguments provided.
@@ -680,7 +702,7 @@ impl WorldAccessGuard<'_> {
         // then build the corresponding dynamic structure, whatever it may be
 
         let dynamic: Box<dyn PartialReflect> = match type_info {
-            bevy::reflect::TypeInfo::Struct(struct_info) => {
+            TypeInfo::Struct(struct_info) => {
                 let fields_iter = struct_info
                     .field_names()
                     .iter()
@@ -702,7 +724,7 @@ impl WorldAccessGuard<'_> {
                 dynamic.set_represented_type(Some(type_info));
                 Box::new(dynamic)
             }
-            bevy::reflect::TypeInfo::TupleStruct(tuple_struct_info) => {
+            TypeInfo::TupleStruct(tuple_struct_info) => {
                 let fields_iter = (0..tuple_struct_info.field_len())
                     .map(|f| {
                         Ok(tuple_struct_info
@@ -721,7 +743,7 @@ impl WorldAccessGuard<'_> {
                 dynamic.set_represented_type(Some(type_info));
                 Box::new(dynamic)
             }
-            bevy::reflect::TypeInfo::Tuple(tuple_info) => {
+            TypeInfo::Tuple(tuple_info) => {
                 let fields_iter = (0..tuple_info.field_len())
                     .map(|f| {
                         Ok(tuple_info
@@ -740,7 +762,7 @@ impl WorldAccessGuard<'_> {
                 dynamic.set_represented_type(Some(type_info));
                 Box::new(dynamic)
             }
-            bevy::reflect::TypeInfo::Enum(enum_info) => {
+            TypeInfo::Enum(enum_info) => {
                 // extract variant from "variant"
                 let variant = payload.remove("variant").ok_or_else(|| {
                     InteropError::missing_data_in_constructor(
@@ -756,7 +778,7 @@ impl WorldAccessGuard<'_> {
                 })?;
 
                 let variant = match variant {
-                    bevy::reflect::VariantInfo::Struct(struct_variant_info) => {
+                    VariantInfo::Struct(struct_variant_info) => {
                         // same as above struct variant
                         let fields_iter = struct_variant_info
                             .field_names()
@@ -779,7 +801,7 @@ impl WorldAccessGuard<'_> {
                         let dynamic = self.construct_dynamic_struct(&mut payload, fields_iter)?;
                         DynamicVariant::Struct(dynamic)
                     }
-                    bevy::reflect::VariantInfo::Tuple(tuple_variant_info) => {
+                    VariantInfo::Tuple(tuple_variant_info) => {
                         // same as tuple variant
                         let fields_iter = (0..tuple_variant_info.field_len())
                             .map(|f| {
@@ -798,7 +820,7 @@ impl WorldAccessGuard<'_> {
                             self.construct_dynamic_tuple(&mut payload, fields_iter, one_indexed)?;
                         DynamicVariant::Tuple(dynamic)
                     }
-                    bevy::reflect::VariantInfo::Unit(_) => DynamicVariant::Unit,
+                    VariantInfo::Unit(_) => DynamicVariant::Unit,
                 };
                 let mut dynamic = DynamicEnum::new(variant_name, variant);
                 dynamic.set_represented_type(Some(type_info));
@@ -809,24 +831,54 @@ impl WorldAccessGuard<'_> {
                     Some(type_info.type_id()),
                     Some(Box::new(payload)),
                     "Type constructor not supported",
-                ))
+                ));
             }
         };
 
         // try to construct type from reflect
         // TODO: it would be nice to have a <dyn PartialReflect>::from_reflect_with_fallback equivalent, that does exactly that
         // only using this as it's already there and convenient, the clone variant hitting will be confusing to end users
-        Ok(<dyn PartialReflect>::from_reflect_or_clone(
-            dynamic.as_ref(),
-            self.clone(),
-        ))
+        <dyn PartialReflect>::from_reflect_or_clone(dynamic.as_ref(), self.clone())
+    }
+
+    /// Loads a script from the given asset path with default settings.
+    pub fn load_script_asset(&self, asset_path: &str) -> Result<Handle<ScriptAsset>, InteropError> {
+        self.with_resource(|r: &AssetServer| r.load(asset_path))
+    }
+
+    /// Checks the load state of a script asset.
+    pub fn get_script_asset_load_state(
+        &self,
+        script: Handle<ScriptAsset>,
+    ) -> Result<LoadState, InteropError> {
+        self.with_resource(|r: &AssetServer| r.load_state(script.id()))
+    }
+
+    /// Attaches a script
+    pub fn attach_script(&self, attachment: ScriptAttachment) -> Result<(), InteropError> {
+        match attachment {
+            ScriptAttachment::EntityScript(entity, handle) => {
+                // find existing script components on the entity
+                self.with_or_insert_component_mut(entity, |c: &mut ScriptComponent| {
+                    c.0.push(handle.clone())
+                })?;
+            }
+            ScriptAttachment::StaticScript(handle) => {
+                self.queue(AddStaticScript::new(handle))?;
+            }
+        };
+
+        Ok(())
     }
 
     /// Spawns a new entity in the world
     pub fn spawn(&self) -> Result<Entity, InteropError> {
         self.with_global_access(|world| {
-            let entity = world.spawn_empty();
-            entity.id()
+            let mut command_queue = CommandQueue::default();
+            let mut commands = Commands::new(&mut command_queue, world);
+            let id = commands.spawn_empty().id();
+            command_queue.apply(world);
+            id
         })
     }
 
@@ -989,7 +1041,7 @@ impl WorldAccessGuard<'_> {
         let cell = self.as_unsafe_world_cell()?;
         let entity = cell
             .get_entity(entity)
-            .ok_or_else(|| InteropError::missing_entity(entity))?;
+            .map_err(|_| InteropError::missing_entity(entity))?;
 
         if entity.contains_id(component_registration.component_id) {
             Ok(Some(ReflectReference {
@@ -1016,7 +1068,7 @@ impl WorldAccessGuard<'_> {
         let cell = self.as_unsafe_world_cell()?;
         let entity = cell
             .get_entity(entity)
-            .ok_or_else(|| InteropError::missing_entity(entity))?;
+            .map_err(|_| InteropError::missing_entity(entity))?;
 
         Ok(entity.contains_id(component_id))
     }
@@ -1111,7 +1163,7 @@ impl WorldAccessGuard<'_> {
             return Err(InteropError::missing_entity(entity));
         }
 
-        self.with_component(entity, |c: Option<&Parent>| c.map(|c| c.get()))
+        self.with_component(entity, |c: Option<&ChildOf>| c.map(|c| c.parent()))
     }
 
     /// insert children into the given entity
@@ -1185,7 +1237,7 @@ impl WorldAccessGuard<'_> {
         self.with_global_access(|world| {
             let mut queue = CommandQueue::default();
             let mut commands = Commands::new(&mut queue, world);
-            commands.entity(parent).despawn_recursive();
+            commands.entity(parent).despawn();
             queue.apply(world);
         })
     }
@@ -1199,7 +1251,7 @@ impl WorldAccessGuard<'_> {
         self.with_global_access(|world| {
             let mut queue = CommandQueue::default();
             let mut commands = Commands::new(&mut queue, world);
-            commands.entity(entity).despawn();
+            commands.entity(entity).remove::<Children>().despawn();
             queue.apply(world);
         })
     }
@@ -1213,7 +1265,7 @@ impl WorldAccessGuard<'_> {
         self.with_global_access(|world| {
             let mut queue = CommandQueue::default();
             let mut commands = Commands::new(&mut queue, world);
-            commands.entity(parent).despawn_descendants();
+            commands.entity(parent).despawn_related::<Children>();
             queue.apply(world);
         })
     }
@@ -1264,8 +1316,8 @@ impl WorldContainer for ThreadWorldContainer {
 #[cfg(test)]
 mod test {
     use super::*;
-    use bevy::reflect::{GetTypeRegistration, Reflect, ReflectFromReflect};
-    use test_utils::test_data::{setup_world, SimpleEnum, SimpleStruct, SimpleTupleStruct};
+    use bevy_reflect::{GetTypeRegistration, ReflectFromReflect};
+    use test_utils::test_data::{SimpleEnum, SimpleStruct, SimpleTupleStruct, setup_world};
 
     #[test]
     fn test_construct_struct() {
@@ -1316,11 +1368,6 @@ mod test {
             Ok::<_, InteropError>(Box::new(SimpleTupleStruct(1)) as Box<dyn PartialReflect>);
 
         pretty_assertions::assert_str_eq!(format!("{result:#?}"), format!("{expected:#?}"));
-    }
-
-    #[derive(Reflect)]
-    struct Test {
-        pub hello: (usize, usize),
     }
 
     #[test]

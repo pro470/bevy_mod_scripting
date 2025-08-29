@@ -2,31 +2,35 @@
 //!
 //! These are designed to be used to pipe inputs into other systems which require them, while handling any configuration erorrs nicely.
 #![allow(deprecated)]
-use std::ops::{Deref, DerefMut};
+use std::{
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
-use bevy::ecs::{
-    component::ComponentId,
-    entity::Entity,
-    event::{Event, EventCursor, EventIterator, Events},
+use bevy_ecs::{
+    archetype::Archetype,
+    component::{ComponentId, Tick},
     query::{Access, AccessConflicts},
+    resource::Resource,
     storage::SparseSetIndex,
-    system::{Local, Resource, SystemParam, SystemState},
-    world::World,
+    system::{SystemMeta, SystemParam, SystemParamValidationError},
+    world::{DeferredWorld, World, unsafe_world_cell::UnsafeWorldCell},
 };
 use fixedbitset::FixedBitSet;
+use parking_lot::Mutex;
 
 use crate::{
+    IntoScriptPluginParams,
     bindings::{
-        access_map::ReflectAccessId, pretty_print::DisplayWithWorld, script_value::ScriptValue,
-        WorldAccessGuard, WorldGuard,
+        WorldAccessGuard, WorldGuard, access_map::ReflectAccessId, pretty_print::DisplayWithWorld,
+        script_value::ScriptValue,
     },
     context::ContextLoadingSettings,
     error::{InteropError, ScriptError},
     event::{CallbackLabel, IntoCallbackLabel},
-    handler::CallbackSettings,
+    handler::ScriptingHandler,
     runtime::RuntimeContainer,
-    script::{ScriptId, Scripts, StaticScripts},
-    IntoScriptPluginParams,
+    script::{ScriptAttachment, ScriptContext, StaticScripts},
 };
 
 /// Executes `system_state.get_mut` followed by `system_state.apply` after running the given closure, makes sure state is correctly handled in the context of an exclusive system.
@@ -39,24 +43,32 @@ pub fn with_handler_system_state<
     world: &mut World,
     f: F,
 ) -> O {
-    let mut system_state: SystemState<WithWorldGuard<HandlerContext<P>>> = SystemState::new(world);
-    let mut with_guard = system_state.get_mut(world);
-    let (guard, handler_ctxt) = with_guard.get_mut();
-    let o = f(guard, handler_ctxt);
-    system_state.apply(world);
+    let mut handler_ctxt = HandlerContext::<P>::yoink(world);
+    let guard = WorldGuard::new_exclusive(world);
+    let o = f(guard, &mut handler_ctxt);
+    handler_ctxt.release(world);
+
     o
 }
 
-/// Semantics of [`bevy::ecs::change_detection::Res`] but doesn't claim read or write on the world by removing the resource from it ahead of time.
+/// Semantics of [`bevy::ecs::change_detection::Res`] but doesn't claim read or
+/// write on the world by removing the resource from it ahead of time.
 ///
 /// Similar to using [`World::resource_scope`].
 ///
-/// This is useful for interacting with scripts, since [`WithWorldGuard`] will ensure scripts cannot gain exclusive access to the world if *any* reads or writes
-/// are claimed on the world. Removing the resource from the world lets you access it in the context of running scripts without blocking exclusive world access.
+/// This is useful for interacting with scripts, since [`WithWorldGuard`] will
+/// ensure scripts cannot gain exclusive access to the world if *any* reads or
+/// writes are claimed on the world. Removing the resource from the world lets
+/// you access it in the context of running scripts without blocking exclusive
+/// world access.
 ///
 /// # Safety
-/// - Because the resource is removed during the `get_param` call, if there is a conflicting resource access, this will be unsafe
-/// - You must ensure you're only using this in combination with system parameters which will not read or write to this resource in `get_param`
+///
+/// - Because the resource is removed during the `get_param` call, if there is a
+///   conflicting resource access, this will be unsafe
+///
+/// - You must ensure you're only using this in combination with system
+///   parameters which will not read or write to this resource in `get_param`
 pub(crate) struct ResScope<'state, T: Resource + Default>(pub &'state mut T);
 
 impl<T: Resource + Default> Deref for ResScope<'_, T> {
@@ -78,32 +90,25 @@ unsafe impl<T: Resource + Default> SystemParam for ResScope<'_, T> {
 
     type Item<'world, 'state> = ResScope<'state, T>;
 
-    fn init_state(
-        _world: &mut World,
-        system_meta: &mut bevy::ecs::system::SystemMeta,
-    ) -> Self::State {
+    fn init_state(_world: &mut World, system_meta: &mut SystemMeta) -> Self::State {
         system_meta.set_has_deferred();
         (T::default(), false)
     }
 
     unsafe fn get_param<'world, 'state>(
         state: &'state mut Self::State,
-        _system_meta: &bevy::ecs::system::SystemMeta,
-        world: bevy::ecs::world::unsafe_world_cell::UnsafeWorldCell<'world>,
-        _change_tick: bevy::ecs::component::Tick,
+        _system_meta: &SystemMeta,
+        world: UnsafeWorldCell<'world>,
+        _change_tick: Tick,
     ) -> Self::Item<'world, 'state> {
         state.1 = true;
-        if let Some(mut r) = world.get_resource_mut::<T>() {
+        if let Some(mut r) = unsafe { world.get_resource_mut::<T>() } {
             std::mem::swap(&mut state.0, &mut r);
         }
         ResScope(&mut state.0)
     }
 
-    fn apply(
-        state: &mut Self::State,
-        _system_meta: &bevy::ecs::system::SystemMeta,
-        world: &mut bevy::ecs::world::World,
-    ) {
+    fn apply(state: &mut Self::State, _system_meta: &SystemMeta, world: &mut World) {
         if state.1 {
             world.insert_resource(std::mem::take(&mut state.0));
             state.1 = false;
@@ -111,44 +116,40 @@ unsafe impl<T: Resource + Default> SystemParam for ResScope<'_, T> {
     }
 }
 
-/// A version of [`bevy::ecs::event::EventReader`] which behaves just like [`ResScope`].
-///
-/// # Safety
-/// - unsafe to use this in a way which violates the invariants on [`ResScope`].
-/// - This is hidden from docs for a reason, rust doesn't allow expressing `type signature unsafety`
-/// - It is only safe to use when other system parameters do not create aliasing references inside their `get_param` calls
-#[derive(SystemParam)]
-#[doc(hidden)]
-#[deprecated(note = "This type is unsafe to use in systems")]
-pub struct EventReaderScope<'s, T: Event> {
-    events: ResScope<'s, Events<T>>,
-    reader: Local<'s, EventCursor<T>>,
-}
-
-#[allow(deprecated)]
-impl<T: Event> EventReaderScope<'_, T> {
-    /// Read all events that happened since the last read
-    pub fn read(&mut self) -> EventIterator<'_, T> {
-        self.reader.read(&self.events)
-    }
-}
-
 /// Context for systems which handle events for scripts
-#[derive(SystemParam)]
-pub struct HandlerContext<'s, P: IntoScriptPluginParams> {
-    /// Settings for callbacks
-    pub(crate) callback_settings: ResScope<'s, CallbackSettings<P>>,
+pub struct HandlerContext<P: IntoScriptPluginParams> {
     /// Settings for loading contexts
-    pub(crate) context_loading_settings: ResScope<'s, ContextLoadingSettings<P>>,
-    /// Scripts
-    pub(crate) scripts: ResScope<'s, Scripts<P>>,
+    pub(crate) context_loading_settings: ContextLoadingSettings<P>,
     /// The runtime container
-    pub(crate) runtime_container: ResScope<'s, RuntimeContainer<P>>,
+    pub(crate) runtime_container: RuntimeContainer<P>,
     /// List of static scripts
-    pub(crate) static_scripts: ResScope<'s, StaticScripts>,
+    pub(crate) static_scripts: StaticScripts,
+    /// Script context
+    pub(crate) script_context: ScriptContext<P>,
 }
 
-impl<P: IntoScriptPluginParams> HandlerContext<'_, P> {
+impl<P: IntoScriptPluginParams> HandlerContext<P> {
+    /// Yoink the handler context from the world, this will remove the matching resource from the world.
+    /// Every call to this function must be paired with a call to [`Self::release`].
+    pub fn yoink(world: &mut World) -> Self {
+        Self {
+            context_loading_settings: world.remove_resource().unwrap_or_default(),
+            runtime_container: world.remove_resource().unwrap_or_default(),
+            static_scripts: world.remove_resource().unwrap_or_default(),
+            script_context: world.remove_resource().unwrap_or_default(),
+        }
+    }
+
+    /// Releases the current handler context back into the world, restoring the resources it contains.
+    /// Only call this if you have previously yoinked the handler context from the world.
+    pub fn release(self, world: &mut World) {
+        // insert the handler context back into the world
+        world.insert_resource(self.context_loading_settings);
+        world.insert_resource(self.runtime_container);
+        world.insert_resource(self.static_scripts);
+        world.insert_resource(self.script_context);
+    }
+
     /// Splits the handler context into its individual components.
     ///
     /// Useful if you are needing multiple resources from the handler context.
@@ -156,34 +157,20 @@ impl<P: IntoScriptPluginParams> HandlerContext<'_, P> {
     pub fn destructure(
         &mut self,
     ) -> (
-        &mut CallbackSettings<P>,
         &mut ContextLoadingSettings<P>,
-        &mut Scripts<P>,
         &mut RuntimeContainer<P>,
         &mut StaticScripts,
     ) {
         (
-            &mut self.callback_settings,
             &mut self.context_loading_settings,
-            &mut self.scripts,
             &mut self.runtime_container,
             &mut self.static_scripts,
         )
     }
 
-    /// Get the callback settings
-    pub fn callback_settings(&mut self) -> &mut CallbackSettings<P> {
-        &mut self.callback_settings
-    }
-
     /// Get the context loading settings
     pub fn context_loading_settings(&mut self) -> &mut ContextLoadingSettings<P> {
         &mut self.context_loading_settings
-    }
-
-    /// Get the scripts
-    pub fn scripts(&mut self) -> &mut Scripts<P> {
-        &mut self.scripts
     }
 
     /// Get the runtime container
@@ -196,40 +183,44 @@ impl<P: IntoScriptPluginParams> HandlerContext<'_, P> {
         &mut self.static_scripts
     }
 
+    /// Get the static scripts
+    pub fn script_context(&mut self) -> &mut ScriptContext<P> {
+        &mut self.script_context
+    }
+
     /// checks if the script is loaded such that it can be executed.
-    pub fn is_script_fully_loaded(&self, script_id: ScriptId) -> bool {
-        self.scripts.scripts.contains_key(&script_id)
+    ///
+    /// since the mapping between scripts and contexts is not one-to-one, will map the context key using the
+    /// context policy to find the script context, if one is found then the script is loaded.
+    pub fn is_script_fully_loaded(&self, key: &ScriptAttachment) -> bool {
+        self.script_context.contains(key)
     }
 
     /// Equivalent to [`Self::call`] but with a dynamically passed in label
     pub fn call_dynamic_label(
         &self,
         label: &CallbackLabel,
-        script_id: &ScriptId,
-        entity: Entity,
+        context_key: &ScriptAttachment,
+        context: Option<Arc<Mutex<P::C>>>,
         payload: Vec<ScriptValue>,
         guard: WorldGuard<'_>,
     ) -> Result<ScriptValue, ScriptError> {
         // find script
-        let script = match self.scripts.scripts.get(script_id) {
-            Some(script) => script,
-            None => return Err(InteropError::missing_script(script_id.clone()).into()),
+        let Some(context) = context.or_else(|| self.script_context.get(context_key)) else {
+            return Err(InteropError::missing_context(context_key.clone()).into());
         };
 
         // call the script
-        let handler = self.callback_settings.callback_handler;
         let pre_handling_initializers = &self
             .context_loading_settings
             .context_pre_handling_initializers;
         let runtime = &self.runtime_container.runtime;
 
-        let mut context = script.context.lock();
+        let mut context = context.lock();
 
-        CallbackSettings::<P>::call(
-            handler,
+        P::handle(
             payload,
-            entity,
-            script_id,
+            context_key,
             label,
             &mut context,
             pre_handling_initializers,
@@ -244,12 +235,11 @@ impl<P: IntoScriptPluginParams> HandlerContext<'_, P> {
     /// Run [`Self::is_script_fully_loaded`] before calling the script to ensure the script and context were loaded ahead of time.
     pub fn call<C: IntoCallbackLabel>(
         &self,
-        script_id: &ScriptId,
-        entity: Entity,
+        context_key: &ScriptAttachment,
         payload: Vec<ScriptValue>,
         guard: WorldGuard<'_>,
     ) -> Result<ScriptValue, ScriptError> {
-        self.call_dynamic_label(&C::into_callback_label(), script_id, entity, payload, guard)
+        self.call_dynamic_label(&C::into_callback_label(), context_key, None, payload, guard)
     }
 }
 
@@ -279,10 +269,7 @@ unsafe impl<T: SystemParam> SystemParam for WithWorldGuard<'_, '_, T> {
 
     type Item<'world, 'state> = WithWorldGuard<'world, 'state, T>;
 
-    fn init_state(
-        world: &mut bevy::ecs::world::World,
-        system_meta: &mut bevy::ecs::system::SystemMeta,
-    ) -> Self::State {
+    fn init_state(world: &mut World, system_meta: &mut SystemMeta) -> Self::State {
         // verify there are no accesses previously
         let other_accessed_components =
             system_meta.component_access_set().combined_access().clone();
@@ -310,12 +297,12 @@ unsafe impl<T: SystemParam> SystemParam for WithWorldGuard<'_, '_, T> {
 
     unsafe fn get_param<'world, 'state>(
         state: &'state mut Self::State,
-        system_meta: &bevy::ecs::system::SystemMeta,
-        world: bevy::ecs::world::unsafe_world_cell::UnsafeWorldCell<'world>,
-        change_tick: bevy::ecs::component::Tick,
+        system_meta: &SystemMeta,
+        world: UnsafeWorldCell<'world>,
+        change_tick: Tick,
     ) -> Self::Item<'world, 'state> {
         // create a guard which can only access the resources/components specified by the system.
-        let guard = WorldAccessGuard::new_exclusive(world.world_mut());
+        let guard = WorldAccessGuard::new_exclusive(unsafe { world.world_mut() });
 
         #[allow(
             clippy::panic,
@@ -324,49 +311,47 @@ unsafe impl<T: SystemParam> SystemParam for WithWorldGuard<'_, '_, T> {
         for (raid, is_write) in &state.1 {
             if *is_write {
                 if !guard.claim_write_access(*raid) {
-                    panic!("System tried to access set of system params which break rust aliasing rules. Aliasing access: {}", (*raid).display_with_world(guard.clone()));
+                    panic!(
+                        "System tried to access set of system params which break rust aliasing rules. Aliasing access: {}",
+                        (*raid).display_with_world(guard.clone())
+                    );
                 }
             } else if !guard.claim_read_access(*raid) {
-                panic!("System tried to access set of system params which break rust aliasing rules. Aliasing access: {}", (*raid).display_with_world(guard.clone()));
+                panic!(
+                    "System tried to access set of system params which break rust aliasing rules. Aliasing access: {}",
+                    (*raid).display_with_world(guard.clone())
+                );
             }
         }
 
         WithWorldGuard {
             world_guard: guard,
-            param: T::get_param(&mut state.0, system_meta, world, change_tick),
+            param: unsafe { T::get_param(&mut state.0, system_meta, world, change_tick) },
         }
     }
 
     unsafe fn new_archetype(
         state: &mut Self::State,
-        archetype: &bevy::ecs::archetype::Archetype,
-        system_meta: &mut bevy::ecs::system::SystemMeta,
+        archetype: &Archetype,
+        system_meta: &mut SystemMeta,
     ) {
-        T::new_archetype(&mut state.0, archetype, system_meta)
+        unsafe { T::new_archetype(&mut state.0, archetype, system_meta) }
     }
 
-    fn apply(
-        state: &mut Self::State,
-        system_meta: &bevy::ecs::system::SystemMeta,
-        world: &mut World,
-    ) {
+    fn apply(state: &mut Self::State, system_meta: &SystemMeta, world: &mut World) {
         T::apply(&mut state.0, system_meta, world)
     }
 
-    fn queue(
-        state: &mut Self::State,
-        system_meta: &bevy::ecs::system::SystemMeta,
-        world: bevy::ecs::world::DeferredWorld,
-    ) {
+    fn queue(state: &mut Self::State, system_meta: &SystemMeta, world: DeferredWorld) {
         T::queue(&mut state.0, system_meta, world)
     }
 
     unsafe fn validate_param(
         state: &Self::State,
-        system_meta: &bevy::ecs::system::SystemMeta,
-        world: bevy::ecs::world::unsafe_world_cell::UnsafeWorldCell,
-    ) -> bool {
-        T::validate_param(&state.0, system_meta, world)
+        system_meta: &SystemMeta,
+        world: UnsafeWorldCell,
+    ) -> Result<(), SystemParamValidationError> {
+        unsafe { T::validate_param(&state.0, system_meta, world) }
     }
 }
 
@@ -412,12 +397,13 @@ pub(crate) fn get_all_access_ids(access: &Access<ComponentId>) -> Vec<(ReflectAc
 
 #[cfg(test)]
 mod test {
-    use bevy::{
-        app::{App, Update},
-        ecs::{
+    use ::{
+        bevy_app::{App, Plugin, Update},
+        bevy_ecs::{
             component::Component,
+            entity::Entity,
             event::{Event, EventReader},
-            system::{Query, ResMut, Resource},
+            system::{Query, ResMut, SystemState},
             world::FromWorld,
         },
     };
@@ -438,17 +424,21 @@ mod test {
         let system_fn = |mut guard: WithWorldGuard<(ResMut<Res>, Query<&'static Comp>)>| {
             let (guard, (_res, _entity)) = guard.get_mut();
             assert_eq!(guard.list_accesses().len(), 2, "Expected 2 accesses");
-            assert!(!guard.claim_read_access(
-                ReflectAccessId::for_resource::<Res>(&guard.as_unsafe_world_cell().unwrap())
-                    .unwrap()
-            ));
-            assert!(!guard.claim_write_access(
-                ReflectAccessId::for_resource::<Res>(&guard.as_unsafe_world_cell().unwrap())
-                    .unwrap()
-            ));
+            assert!(
+                !guard.claim_read_access(
+                    ReflectAccessId::for_resource::<Res>(&guard.as_unsafe_world_cell().unwrap())
+                        .unwrap()
+                )
+            );
+            assert!(
+                !guard.claim_write_access(
+                    ReflectAccessId::for_resource::<Res>(&guard.as_unsafe_world_cell().unwrap())
+                        .unwrap()
+                )
+            );
         };
 
-        let mut app = bevy::app::App::new();
+        let mut app = App::new();
         app.add_systems(Update, system_fn);
         app.insert_resource(Res);
         app.world_mut().spawn(Comp);
@@ -465,7 +455,7 @@ mod test {
     pub fn check_with_world_panics_when_used_with_resource_top_level() {
         let system_fn = |_res: ResMut<Res>, mut _guard: WithWorldGuard<Query<&'static Comp>>| {};
 
-        let mut app = bevy::app::App::new();
+        let mut app = App::new();
         app.add_systems(Update, system_fn);
         app.insert_resource(Res);
         app.world_mut().spawn(Comp);
@@ -485,7 +475,7 @@ mod test {
         let system_fn =
             |_res: EventReader<TestEvent>, mut _guard: WithWorldGuard<Query<&'static Comp>>| {};
 
-        let mut app = bevy::app::App::new();
+        let mut app = App::new();
         app.add_systems(Update, system_fn);
         app.insert_resource(Res);
         app.world_mut().spawn(Comp);
