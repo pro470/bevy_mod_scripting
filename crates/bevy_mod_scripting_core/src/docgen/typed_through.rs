@@ -3,10 +3,12 @@
 
 use std::{ffi::OsString, path::PathBuf};
 
-use bevy::reflect::{TypeInfo, Typed};
+use bevy_platform::collections::HashMap;
+use bevy_reflect::{TypeInfo, Typed};
 
 use crate::{
     bindings::{
+        ReflectReference,
         function::{
             from::{Mut, Ref, Union, Val},
             script_function::{
@@ -14,7 +16,6 @@ use crate::{
             },
         },
         script_value::ScriptValue,
-        ReflectReference,
     },
     error::InteropError,
     reflection_extensions::TypeInfoExtensions,
@@ -186,6 +187,15 @@ impl<T: TypedThrough> TypedThrough for Vec<T> {
     }
 }
 
+impl<K: TypedThrough, V: TypedThrough> TypedThrough for HashMap<K, V> {
+    fn through_type_info() -> ThroughTypeInfo {
+        ThroughTypeInfo::TypedWrapper(TypedWrapperKind::HashMap(
+            Box::new(K::through_type_info()),
+            Box::new(V::through_type_info()),
+        ))
+    }
+}
+
 impl<K: TypedThrough, V: TypedThrough> TypedThrough for std::collections::HashMap<K, V> {
     fn through_type_info() -> ThroughTypeInfo {
         ThroughTypeInfo::TypedWrapper(TypedWrapperKind::HashMap(
@@ -220,7 +230,7 @@ macro_rules! impl_through_typed {
         $(
             impl $crate::docgen::typed_through::TypedThrough for $ty {
                 fn through_type_info() -> $crate::docgen::typed_through::ThroughTypeInfo {
-                    $crate::docgen::typed_through::ThroughTypeInfo::TypeInfo(<$ty as bevy::reflect::Typed>::type_info())
+                    $crate::docgen::typed_through::ThroughTypeInfo::TypeInfo(<$ty as bevy_reflect::Typed>::type_info())
                 }
             }
         )*
@@ -265,20 +275,7 @@ macro_rules! impl_through_typed_tuple {
     };
 }
 
-impl_through_typed_tuple!();
-impl_through_typed_tuple!(T0);
-impl_through_typed_tuple!(T0, T1);
-impl_through_typed_tuple!(T0, T1, T2);
-impl_through_typed_tuple!(T0, T1, T2, T3);
-impl_through_typed_tuple!(T0, T1, T2, T3, T4);
-impl_through_typed_tuple!(T0, T1, T2, T3, T4, T5);
-impl_through_typed_tuple!(T0, T1, T2, T3, T4, T5, T6);
-impl_through_typed_tuple!(T0, T1, T2, T3, T4, T5, T6, T7);
-impl_through_typed_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8);
-impl_through_typed_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9);
-impl_through_typed_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
-impl_through_typed_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
-impl_through_typed_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
+variadics_please::all_tuples!(impl_through_typed_tuple, 0, 13, T);
 
 #[cfg(test)]
 mod test {
@@ -368,7 +365,7 @@ mod test {
         ));
 
         assert!(matches!(
-            std::collections::HashMap::<i32, f32>::through_type_info(),
+            HashMap::<i32, f32>::through_type_info(),
             ThroughTypeInfo::TypedWrapper(TypedWrapperKind::HashMap(..))
         ));
 
@@ -401,7 +398,7 @@ mod test {
         ));
 
         assert!(matches!(
-            into_through_type_info(std::collections::HashMap::<i32, f32>::type_info()),
+            into_through_type_info(HashMap::<i32, f32>::type_info()),
             ThroughTypeInfo::TypedWrapper(TypedWrapperKind::HashMap(..))
         ));
 

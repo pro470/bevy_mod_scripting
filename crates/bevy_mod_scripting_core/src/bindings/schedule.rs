@@ -1,34 +1,35 @@
 //! Dynamic scheduling from scripts
 
-use super::{script_system::ScriptSystemBuilder, WorldAccessGuard};
-use crate::{error::InteropError, IntoScriptPluginParams};
-use bevy::{
-    app::{
+use super::{WorldAccessGuard, script_system::ScriptSystemBuilder};
+use crate::{IntoScriptPluginParams, error::InteropError};
+use ::{
+    bevy_app::{
         First, FixedFirst, FixedLast, FixedMain, FixedPostUpdate, FixedPreUpdate, FixedUpdate,
         Last, PostStartup, PostUpdate, PreStartup, PreUpdate, RunFixedMainLoop, Startup, Update,
     },
-    ecs::{
+    bevy_ecs::{
         schedule::{Schedule, ScheduleLabel, Schedules},
-        resource::Resource,
         world::World,
     },
 };
+use bevy_ecs::resource::Resource;
+use bevy_log::debug;
+use bevy_platform::collections::HashMap;
 use bevy_system_reflection::{ReflectSchedule, ReflectSystem};
 use parking_lot::RwLock;
-use std::{any::TypeId, collections::HashMap, sync::Arc};
-
+use std::{any::TypeId, sync::Arc};
 #[derive(Default, Clone, Resource)]
 /// A Send + Sync registry of bevy schedules.
 pub struct AppScheduleRegistry(Arc<RwLock<ScheduleRegistry>>);
 
 impl AppScheduleRegistry {
     /// Reads the schedule registry.
-    pub fn read(&self) -> parking_lot::RwLockReadGuard<ScheduleRegistry> {
+    pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, ScheduleRegistry> {
         self.0.read()
     }
 
     /// Writes to the schedule registry.
-    pub fn write(&self) -> parking_lot::RwLockWriteGuard<ScheduleRegistry> {
+    pub fn write(&self) -> parking_lot::RwLockWriteGuard<'_, ScheduleRegistry> {
         self.0.write()
     }
 
@@ -173,10 +174,10 @@ impl WorldAccessGuard<'_> {
         schedule: &ReflectSchedule,
         builder: ScriptSystemBuilder,
     ) -> Result<ReflectSystem, InteropError> {
-        bevy::log::debug!(
+        debug!(
             "Adding script system '{}' for script '{}' to schedule '{}'",
             builder.name,
-            builder.script_id,
+            builder.attachment,
             schedule.identifier()
         );
 
@@ -191,10 +192,10 @@ impl WorldAccessGuard<'_> {
     reason = "tests are there but not working currently"
 )]
 mod tests {
-
-    use bevy::{
-        app::{App, Update},
-        ecs::{
+    use ::{
+        bevy_app::{App, Plugin, Update},
+        bevy_ecs::{
+            entity::Entity,
             schedule::{NodeId, Schedules},
             system::IntoSystem,
         },
@@ -231,7 +232,10 @@ mod tests {
         let system = ReflectSystem::from_system(&system, NodeId::Set(0));
 
         assert_eq!(system.identifier(), "test_system_generic");
-        assert_eq!(system.path(), "bevy_mod_scripting_core::bindings::schedule::tests::test_system_generic<alloc::string::String>");
+        assert_eq!(
+            system.path(),
+            "bevy_mod_scripting_core::bindings::schedule::tests::test_system_generic<alloc::string::String>"
+        );
 
         let system = IntoSystem::into_system(test_system);
         let system = ReflectSystem::from_system(&system, NodeId::Set(0));
@@ -280,7 +284,7 @@ mod tests {
     /// * `expected_nodes` - A slice of node names expected to be present.
     /// * `expected_edges` - A slice of tuples representing expected edges (from, to).
     pub fn verify_schedule_graph<T>(
-        app: &mut bevy::prelude::App,
+        app: &mut App,
         schedule_label: T,
         expected_nodes: &[&str],
         expected_edges: &[(&str, &str)],
@@ -307,7 +311,7 @@ mod tests {
                 if let Some(system) = graph.get_system_at(node_id) {
                     system.name().clone().to_string()
                 } else if let Some(system_set) = graph.get_set_at(node_id) {
-                    format!("{:?}", system_set).to_string()
+                    format!("{system_set:?}").to_string()
                 } else {
                     // try schedule systems
                     let mut default = format!("{node_id:?}").to_string();
@@ -342,7 +346,7 @@ mod tests {
 
         // Collect all edges as (from, to) name pairs.
         let mut found_edges = Vec::new();
-        for (from, to, _) in graph.dependency().graph().all_edges() {
+        for (from, to) in graph.dependency().graph().all_edges() {
             let name_from = resolve_name(from);
             let name_to = resolve_name(to);
             found_edges.push((name_from, name_to));
@@ -352,10 +356,7 @@ mod tests {
         for &(exp_from, exp_to) in expected_edges {
             assert!(
                 found_edges.contains(&(exp_from.to_owned(), exp_to.to_owned())),
-                "Expected edge ({} -> {}) not found. Found edges: {:?}",
-                exp_from,
-                exp_to,
-                found_edges
+                "Expected edge ({exp_from} -> {exp_to}) not found. Found edges: {found_edges:?}"
             );
         }
 

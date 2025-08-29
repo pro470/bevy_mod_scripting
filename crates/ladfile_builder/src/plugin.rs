@@ -2,20 +2,17 @@
 
 use std::path::PathBuf;
 
-use bevy::{
-    app::{App, Plugin, Startup},
-    ecs::{
-        reflect::AppTypeRegistry,
-        system::{Res, Resource},
-        world::World,
-    },
+use ::{
+    bevy_app::{App, Plugin, Startup},
+    bevy_ecs::{prelude::Resource, reflect::AppTypeRegistry, system::Res, world::World},
 };
+use bevy_log::{error, info};
 use bevy_mod_scripting_core::bindings::{
+    IntoNamespace,
     function::{namespace::Namespace, script_function::AppScriptFunctionRegistry},
     globals::AppScriptGlobalsRegistry,
-    IntoNamespace, MarkAsCore, MarkAsGenerated, MarkAsSignificant,
 };
-use ladfile::{default_importance, LadTypeKind};
+use ladfile::{LadTypeKind, default_importance};
 
 use crate::LadFileBuilder;
 
@@ -115,18 +112,6 @@ pub fn generate_lad_file(
 
         builder.add_type_info(type_info);
 
-        if registration.contains::<MarkAsGenerated>() {
-            builder.mark_generated(registration.type_id());
-        }
-
-        if registration.contains::<MarkAsCore>() {
-            builder.set_insignificance(registration.type_id(), default_importance() / 2);
-        }
-
-        if registration.contains::<MarkAsSignificant>() {
-            builder.set_insignificance(registration.type_id(), default_importance() / 4);
-        }
-
         // find functions on the namespace
         for (_, function) in
             function_registry.iter_namespace(Namespace::OnType(type_info.type_id()))
@@ -148,8 +133,14 @@ pub fn generate_lad_file(
 
     // find global dummies
     for (key, global) in global_registry.iter_dummies() {
-        let lad_type_id = builder.lad_id_from_type_id(global.type_id);
-        builder.add_instance_manually(key.to_string(), false, LadTypeKind::Val(lad_type_id));
+        let kind = if let Some(type_info) = &global.type_information {
+            builder.add_through_type_info(type_info);
+            builder.lad_type_kind_from_through_type(type_info)
+        } else {
+            LadTypeKind::Val(builder.lad_id_from_type_id(global.type_id))
+        };
+
+        builder.add_instance_manually(key.to_string(), false, kind);
     }
 
     let file = builder.build();
@@ -161,7 +152,7 @@ pub fn generate_lad_file(
     let file = match ladfile::serialize_lad_file(&file, settings.pretty) {
         Ok(file) => file,
         Err(e) => {
-            bevy::log::error!("Error serializing LAD file: {}", e);
+            error!("Error serializing LAD file: {}", e);
             return;
         }
     };
@@ -169,10 +160,10 @@ pub fn generate_lad_file(
     // save
     match std::fs::write(&path, file) {
         Ok(_) => {
-            bevy::log::info!("Successfully generated LAD file at {:?}", path);
+            info!("Successfully generated LAD file at {:?}", path);
         }
         Err(e) => {
-            bevy::log::error!("Error saving LAD file to {:?}: {}", path, e);
+            error!("Error saving LAD file to {:?}: {}", path, e);
         }
     }
 }

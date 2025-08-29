@@ -8,7 +8,7 @@ use mdbook::book::{Chapter, SectionNumber};
 
 use crate::{
     argument_visitor::MarkdownArgumentVisitor,
-    markdown::{markdown_substring, IntoMarkdown, Markdown, MarkdownBuilder, TableBuilder},
+    markdown::{IntoMarkdown, Markdown, MarkdownBuilder, TableBuilder, markdown_substring},
     markdown_vec,
 };
 
@@ -247,7 +247,7 @@ impl<'a> Section<'a> {
         }
     }
 
-    pub(crate) fn section_items(&self) -> Vec<SectionItem> {
+    pub(crate) fn section_items(&self) -> Vec<SectionItem<'_>> {
         match self.data {
             SectionData::Summary { .. } => {
                 let title = self.title().clone();
@@ -269,8 +269,9 @@ impl<'a> Section<'a> {
                             builder.row(markdown_vec![
                                 Markdown::new_paragraph("Global Functions").code(),
                                 Markdown::Link {
-                                    text:
-                                        Box::new("Documents all the global functions present in the bindings"),
+                                    text: Box::new(
+                                        "Documents all the global functions present in the bindings"
+                                    ),
                                     url: format!(
                                         "./{}/functions.md",
                                         linkify_filename(title.clone())
@@ -281,7 +282,9 @@ impl<'a> Section<'a> {
                             builder.row(markdown_vec![
                                 Markdown::new_paragraph("Globals").code(),
                                 Markdown::Link {
-                                    text: Box::new("Documents all global variables present in the bindings"),
+                                    text: Box::new(
+                                        "Documents all global variables present in the bindings"
+                                    ),
                                     url: format!(
                                         "./{}/globals.md",
                                         linkify_filename(title.clone())
@@ -704,7 +707,7 @@ fn build_lad_function_argument_row(
         .name
         .as_ref()
         .cloned()
-        .unwrap_or_else(|| Cow::Owned(format!("arg{}", idx)));
+        .unwrap_or_else(|| Cow::Owned(format!("arg{idx}")));
 
     builder.row(markdown_vec![
         Markdown::new_paragraph(arg_name).bold(),

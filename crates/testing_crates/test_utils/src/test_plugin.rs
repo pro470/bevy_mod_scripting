@@ -3,7 +3,7 @@
 #[macro_export]
 macro_rules! make_test_plugin {
     ($ident: ident) => {
-        // #[derive(Default)]
+        #[derive(std::fmt::Debug)]
         struct TestPlugin($ident::ScriptingPlugin<Self>);
 
         impl Default for TestPlugin {
@@ -12,8 +12,8 @@ macro_rules! make_test_plugin {
             }
         }
 
-        impl bevy::app::Plugin for TestPlugin {
-            fn build(&self, app: &mut bevy::app::App) {
+        impl Plugin for TestPlugin {
+            fn build(&self, app: &mut App) {
                 self.0.build(app);
             }
         }
@@ -29,15 +29,45 @@ macro_rules! make_test_plugin {
                     invocations: vec![].into(),
                 }
             }
+
+            fn handler() -> $ident::HandlerFn<Self> {
+                (|args, context_key, callback, script_ctxt, pre_handling_initializers, runtime| {
+                    runtime
+                        .invocations
+                        .lock()
+                        .push((context_key.entity(), Some(context_key.script().id())));
+                    Ok($ident::bindings::script_value::ScriptValue::Unit)
+                }) as $ident::HandlerFn<Self>
+            }
+
+            fn context_loader() -> $ident::ContextLoadFn<Self> {
+                (|attachment, content, context_initializers, pre_handling_initializers, runtime| {
+                    Ok(TestContext {
+                        invocations: vec![],
+                    })
+                })
+            }
+
+            fn context_reloader() -> $ident::ContextReloadFn<Self> {
+                (|attachment,
+                  content,
+                  previous_context,
+                  context_initializers,
+                  pre_handling_initializers,
+                  runtime| {
+                    previous_context.invocations.clear();
+                    Ok(())
+                })
+            }
         }
 
-        #[derive(Default)]
+        #[derive(Default, std::fmt::Debug)]
         struct TestRuntime {
             pub invocations:
-                parking_lot::Mutex<Vec<(bevy::prelude::Entity, $ident::script::ScriptId)>>,
+                parking_lot::Mutex<Vec<(Option<Entity>, Option<$ident::script::ScriptId>)>>,
         }
 
-        #[derive(Default)]
+        #[derive(Default, std::fmt::Debug, Clone)]
         struct TestContext {
             pub invocations: Vec<$ident::bindings::script_value::ScriptValue>,
         }

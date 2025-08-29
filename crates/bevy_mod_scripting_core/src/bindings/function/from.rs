@@ -1,11 +1,12 @@
 //! This module contains the [`FromScript`] trait and its implemenations.
 
 use crate::{
-    bindings::{access_map::ReflectAccessId, ReflectReference, WorldGuard},
-    error::InteropError,
     ScriptValue,
+    bindings::{ReflectReference, WorldGuard, access_map::ReflectAccessId},
+    error::InteropError,
 };
-use bevy::reflect::{FromReflect, Reflect};
+use bevy_platform::collections::HashMap;
+use bevy_reflect::{FromReflect, Reflect};
 use std::{
     any::TypeId,
     ffi::OsString,
@@ -91,7 +92,9 @@ macro_rules! impl_from_with_downcast {
     };
 }
 
-impl_from_with_downcast!(i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, f32, f64, usize, isize);
+impl_from_with_downcast!(
+    i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, f32, f64, usize, isize
+);
 
 macro_rules! impl_from_stringlike {
     ($($ty:ty),*) => {
@@ -449,38 +452,45 @@ impl FromScript for DynamicScriptFunction {
     }
 }
 
-#[profiling::all_functions]
-impl<V> FromScript for std::collections::HashMap<String, V>
-where
-    V: FromScript + 'static,
-    for<'w> V::This<'w>: Into<V>,
-{
-    type This<'w> = Self;
-    #[profiling::function]
-    fn from_script(value: ScriptValue, world: WorldGuard) -> Result<Self, InteropError> {
-        match value {
-            ScriptValue::Map(map) => {
-                let mut hashmap = std::collections::HashMap::new();
-                for (key, value) in map {
-                    hashmap.insert(key, V::from_script(value, world.clone())?.into());
+macro_rules! impl_from_script_hashmap {
+    ($hashmap_type:path) => {
+        #[profiling::all_functions]
+        impl<V> FromScript for $hashmap_type
+        where
+            V: FromScript + 'static,
+            for<'w> V::This<'w>: Into<V>,
+        {
+            type This<'w> = Self;
+            #[profiling::function]
+            fn from_script(value: ScriptValue, world: WorldGuard) -> Result<Self, InteropError> {
+                match value {
+                    ScriptValue::Map(map) => {
+                        let mut hashmap = <$hashmap_type>::new();
+                        for (key, value) in map {
+                            hashmap.insert(key, V::from_script(value, world.clone())?.into());
+                        }
+                        Ok(hashmap)
+                    }
+                    ScriptValue::List(list) => {
+                        let mut hashmap = <$hashmap_type>::new();
+                        for elem in list {
+                            let (key, val) = <(String, V)>::from_script(elem, world.clone())?;
+                            hashmap.insert(key, val);
+                        }
+                        Ok(hashmap)
+                    }
+                    _ => Err(InteropError::value_mismatch(
+                        std::any::TypeId::of::<$hashmap_type>(),
+                        value,
+                    )),
                 }
-                Ok(hashmap)
             }
-            ScriptValue::List(list) => {
-                let mut hashmap = std::collections::HashMap::new();
-                for elem in list {
-                    let (key, val) = <(String, V)>::from_script(elem, world.clone())?;
-                    hashmap.insert(key, val);
-                }
-                Ok(hashmap)
-            }
-            _ => Err(InteropError::value_mismatch(
-                std::any::TypeId::of::<std::collections::HashMap<String, V>>(),
-                value,
-            )),
         }
-    }
+    };
 }
+
+impl_from_script_hashmap!(HashMap<String, V>);
+impl_from_script_hashmap!(std::collections::HashMap<String, V>);
 
 /// A union of two or more (by nesting unions) types.
 pub struct Union<T1, T2>(Result<T1, T2>);
@@ -585,17 +595,4 @@ macro_rules! impl_from_script_tuple {
     };
 }
 
-impl_from_script_tuple!(T0);
-impl_from_script_tuple!(T0, T1);
-impl_from_script_tuple!(T0, T1, T2);
-impl_from_script_tuple!(T0, T1, T2, T3);
-impl_from_script_tuple!(T0, T1, T2, T3, T4);
-impl_from_script_tuple!(T0, T1, T2, T3, T4, T5);
-impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6);
-impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7);
-impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8);
-impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9);
-impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
-impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
-impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
-impl_from_script_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13);
+variadics_please::all_tuples!(impl_from_script_tuple, 1, 14, T);

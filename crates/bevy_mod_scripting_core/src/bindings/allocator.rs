@@ -1,20 +1,20 @@
 //! An allocator used to control the lifetime of allocations
 
-use bevy::{
-    app::{App, Plugin, PostUpdate},
-    diagnostic::{Diagnostic, DiagnosticPath, Diagnostics, RegisterDiagnostic},
-    ecs::{system::Res, resource::Resource},
-    prelude::ResMut,
-    reflect::PartialReflect,
-    platform::collections::HashMap,
+use ::{
+    bevy_app::{App, Plugin, PostUpdate},
+    bevy_diagnostic::{Diagnostic, DiagnosticPath, Diagnostics, RegisterDiagnostic},
+    bevy_ecs::system::Res,
+    bevy_reflect::PartialReflect,
 };
+use bevy_ecs::{resource::Resource, system::ResMut};
+use bevy_platform::collections::HashMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{
     cell::UnsafeCell,
     cmp::Ordering,
     fmt::{Display, Formatter},
     hash::Hasher,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{Arc, atomic::AtomicU64},
 };
 
 /// The path used for the total number of allocations diagnostic
@@ -61,7 +61,7 @@ impl Eq for ReflectAllocationId {}
 
 impl PartialOrd for ReflectAllocationId {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.id().cmp(&other.id()))
+        Some(self.cmp(other))
     }
 }
 
@@ -120,7 +120,7 @@ impl ReflectAllocation {
     /// # Safety
     /// - Must only be done if no other references to this allocation exist at the same time
     pub unsafe fn take(self) -> Box<dyn PartialReflect> {
-        std::mem::transmute(self.0)
+        unsafe { std::mem::transmute(self.0) }
     }
 }
 
@@ -146,12 +146,12 @@ impl Default for AppReflectAllocator {
 
 impl AppReflectAllocator {
     /// claim a read lock on the allocator
-    pub fn read(&self) -> RwLockReadGuard<ReflectAllocator> {
+    pub fn read(&self) -> RwLockReadGuard<'_, ReflectAllocator> {
         self.allocator.read()
     }
 
     /// claim a write lock on the allocator
-    pub fn write(&self) -> RwLockWriteGuard<ReflectAllocator> {
+    pub fn write(&self) -> RwLockWriteGuard<'_, ReflectAllocator> {
         self.allocator.write()
     }
 }

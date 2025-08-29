@@ -1,10 +1,13 @@
-use bevy::{app::App, ecs::reflect::AppTypeRegistry, DefaultPlugins};
+use bevy::{DefaultPlugins, app::App, ecs::reflect::AppTypeRegistry};
 use bevy_mod_scripting::ScriptFunctionsPlugin;
-use bevy_mod_scripting_core::bindings::{
-    function::script_function::AppScriptFunctionRegistry,
-    globals::{core::CoreScriptGlobalsPlugin, AppScriptGlobalsRegistry},
+use bevy_mod_scripting_core::{
+    BMSScriptingInfrastructurePlugin,
+    bindings::{
+        function::script_function::AppScriptFunctionRegistry,
+        globals::{AppScriptGlobalsRegistry, core::CoreScriptGlobalsPlugin},
+    },
 };
-use ladfile_builder::plugin::{generate_lad_file, LadFileSettings, ScriptingDocgenPlugin};
+use ladfile_builder::plugin::{LadFileSettings, ScriptingDocgenPlugin, generate_lad_file};
 
 fn main() -> std::io::Result<()> {
     let mut app = App::new();
@@ -18,6 +21,7 @@ fn main() -> std::io::Result<()> {
         // the definitions by themselves
         CoreScriptGlobalsPlugin::default(),
         ScriptFunctionsPlugin,
+        BMSScriptingInfrastructurePlugin,
     ));
 
     // there are two ways to generate the ladfile

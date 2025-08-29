@@ -1,15 +1,15 @@
 //! Contains abstractions for exposing "globals" to scripts, in a language-agnostic way.
 
 use super::{
+    WorldGuard,
     function::arg_meta::{ScriptReturn, TypedScriptReturn},
     script_value::ScriptValue,
-    WorldGuard,
 };
 use crate::{
-    docgen::{into_through_type_info, typed_through::ThroughTypeInfo},
+    docgen::{TypedThrough, into_through_type_info, typed_through::ThroughTypeInfo},
     error::InteropError,
 };
-use bevy::{ecs::resource::Resource, reflect::Typed, platform::collections::HashMap};
+use ::{bevy_ecs::resource::Resource, bevy_platform::collections::HashMap, bevy_reflect::Typed};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{any::TypeId, borrow::Cow, sync::Arc};
 
@@ -24,12 +24,12 @@ pub struct AppScriptGlobalsRegistry(Arc<RwLock<ScriptGlobalsRegistry>>);
 #[profiling::all_functions]
 impl AppScriptGlobalsRegistry {
     /// Returns a reference to the inner [`ScriptGlobalsRegistry`].
-    pub fn read(&self) -> RwLockReadGuard<ScriptGlobalsRegistry> {
+    pub fn read(&self) -> RwLockReadGuard<'_, ScriptGlobalsRegistry> {
         self.0.read()
     }
 
     /// Returns a mutable reference to the inner [`ScriptGlobalsRegistry`].
-    pub fn write(&self) -> RwLockWriteGuard<ScriptGlobalsRegistry> {
+    pub fn write(&self) -> RwLockWriteGuard<'_, ScriptGlobalsRegistry> {
         self.0.write()
     }
 }
@@ -156,6 +156,22 @@ impl ScriptGlobalsRegistry {
         );
     }
 
+    /// Typed equivalent to [`Self::register_dummy`].
+    pub fn register_dummy_typed<T: 'static + TypedThrough>(
+        &mut self,
+        name: impl Into<Cow<'static, str>>,
+        documentation: impl Into<Cow<'static, str>>,
+    ) {
+        self.dummies.insert(
+            name.into(),
+            ScriptGlobalDummy {
+                documentation: Some(documentation.into()),
+                type_id: TypeId::of::<T>(),
+                type_information: Some(T::through_type_info()),
+            },
+        );
+    }
+
     /// Inserts a global into the registry, returns the previous value if it existed.
     ///
     /// This is a version of [`Self::register`] which stores type information regarding the global.
@@ -235,7 +251,7 @@ impl ScriptGlobalsRegistry {
 
 #[cfg(test)]
 mod test {
-    use bevy::ecs::world::World;
+    use bevy_ecs::world::World;
 
     use super::*;
 
@@ -278,9 +294,11 @@ mod test {
 
         let maker = |_: WorldGuard| Ok(ScriptValue::from(42));
 
-        assert!(registry
-            .register_documented(Cow::Borrowed("foo"), maker, Cow::Borrowed("This is a test"))
-            .is_none());
+        assert!(
+            registry
+                .register_documented(Cow::Borrowed("foo"), maker, Cow::Borrowed("This is a test"))
+                .is_none()
+        );
 
         let global = registry.get("foo").unwrap();
         assert_eq!(global.documentation.as_deref(), Some("This is a test"));

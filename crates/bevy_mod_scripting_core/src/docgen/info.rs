@@ -2,8 +2,9 @@
 
 use crate::bindings::function::arg_meta::ArgMeta;
 use crate::bindings::function::namespace::Namespace;
-use bevy::reflect::Reflect;
+use bevy_reflect::Reflect;
 use std::{any::TypeId, borrow::Cow};
+
 use super::typed_through::{ThroughTypeInfo, TypedThrough};
 
 /// for things you can call and provide some introspection capability.
@@ -190,20 +191,7 @@ macro_rules! impl_documentable {
     };
 }
 
-impl_documentable!();
-impl_documentable!(T0);
-impl_documentable!(T0, T1);
-impl_documentable!(T0, T1, T2);
-impl_documentable!(T0, T1, T2, T3);
-impl_documentable!(T0, T1, T2, T3, T4);
-impl_documentable!(T0, T1, T2, T3, T4, T5);
-impl_documentable!(T0, T1, T2, T3, T4, T5, T6);
-impl_documentable!(T0, T1, T2, T3, T4, T5, T6, T7);
-impl_documentable!(T0, T1, T2, T3, T4, T5, T6, T7, T8);
-impl_documentable!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9);
-impl_documentable!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
-impl_documentable!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
-impl_documentable!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
+variadics_please::all_tuples!(impl_documentable, 0, 13, T);
 
 #[cfg(test)]
 mod test {

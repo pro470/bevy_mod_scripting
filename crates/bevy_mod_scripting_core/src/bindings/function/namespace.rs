@@ -4,10 +4,8 @@ use crate::{
     bindings::function::script_function::{AppScriptFunctionRegistry, ScriptFunction},
     docgen::info::GetFunctionInfo,
 };
-use bevy::{
-    prelude::{AppTypeRegistry, World},
-    reflect::{GetTypeRegistration, Reflect},
-};
+use ::bevy_reflect::{GetTypeRegistration, Reflect};
+use bevy_ecs::{reflect::AppTypeRegistry, world::World};
 use std::{any::TypeId, borrow::Cow, marker::PhantomData};
 
 use super::type_dependencies::GetFunctionTypeDependencies;
@@ -50,7 +48,7 @@ impl Namespace {
     pub fn prefix(self) -> Cow<'static, str> {
         match self {
             Namespace::Global => Cow::Borrowed(""),
-            Namespace::OnType(type_id) => Cow::Owned(format!("{:?}::", type_id)),
+            Namespace::OnType(type_id) => Cow::Owned(format!("{type_id:?}::")),
         }
     }
 
