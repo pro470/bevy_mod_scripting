@@ -8,12 +8,13 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::ty::{AdtDef, TyCtxt};
 use serde::Serialize;
 
-use crate::{ImportPathFinder, MetaLoader, TemplateContext};
+use crate::{ImportPathFinder, MetaLoader, TemplateContext, candidate::GenerationCandidate};
 
 pub(crate) struct BevyCtxt<'tcx> {
     pub(crate) tcx: TyCtxt<'tcx>,
     pub(crate) meta_loader: MetaLoader,
-    pub(crate) reflect_types: IndexMap<DefId, ReflectType<'tcx>>,
+    pub(crate) reflect_types: IndexMap<DefId, GenerationCandidate<'tcx, AdtDef<'tcx>>>,
+    pub(crate) excluded_reflect_types: Vec<GenerationCandidate<'tcx, Option<AdtDef<'tcx>>>>,
     pub(crate) cached_traits: CachedTraits,
     pub(crate) path_finder: ImportPathFinder<'tcx>,
     pub(crate) workspace: WorkspaceGraph,
@@ -35,6 +36,7 @@ impl<'tcx> BevyCtxt<'tcx> {
         Self {
             tcx,
             reflect_types: Default::default(),
+            excluded_reflect_types: Default::default(),
             cached_traits: Default::default(),
             meta_loader: MetaLoader::new(meta_dirs.to_vec(), workspace_meta),
             template_context: Default::default(),
@@ -58,42 +60,10 @@ impl<'tcx> BevyCtxt<'tcx> {
     }
 }
 
-#[derive(Clone, Default, Debug)]
-pub(crate) struct ReflectType<'tcx> {
-    /// Map from traits to their implementations for the reflect type (from a selection)
-    pub(crate) trait_impls: Option<HashMap<DefId, Vec<DefId>>>,
-    /// Information about the ADT structure, fields, and variants
-    pub(crate) variant_data: Option<AdtDef<'tcx>>,
-    /// Functions passing criteria to be proxied
-    pub(crate) valid_functions: Option<Vec<FunctionContext>>,
-
-    /// Mapping from fields to the reflection strategy
-    field_reflection_types: IndexMap<DefId, ReflectionStrategy>,
-}
-
-impl ReflectType<'_> {
-    pub(crate) fn set_field_reflection_strategies<
-        I: Iterator<Item = (DefId, ReflectionStrategy)>,
-    >(
-        &mut self,
-        field_strats: I,
-    ) {
-        self.field_reflection_types = field_strats.collect();
-    }
-
-    pub(crate) fn get_field_reflection_strat(&self, field: DefId) -> Option<&ReflectionStrategy> {
-        self.field_reflection_types.get(&field)
-    }
-}
-
-pub(crate) const DEF_PATHS_BMS_FROM_SCRIPT: [&str; 2] = [
-    "bevy_mod_scripting_core::bindings::FromScript",
-    "bindings::FromScript",
-];
-pub(crate) const DEF_PATHS_BMS_INTO_SCRIPT: [&str; 2] = [
-    "bevy_mod_scripting_core::bindings::IntoScript",
-    "bindings::IntoScript",
-];
+pub(crate) const DEF_PATHS_BMS_FROM_SCRIPT: [&str; 2] =
+    ["bevy_mod_scripting_bindings::FromScript", "FromScript"];
+pub(crate) const DEF_PATHS_BMS_INTO_SCRIPT: [&str; 2] =
+    ["bevy_mod_scripting_bindings::IntoScript", "IntoScript"];
 
 pub(crate) const DEF_PATHS_REFLECT: [&str; 2] =
     ["bevy_reflect::PartialReflect", "reflect::PartialReflect"];
@@ -194,17 +164,7 @@ impl CachedTraits {
     // }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct FunctionContext {
-    pub(crate) def_id: DefId,
-    pub(crate) has_self: bool,
-    pub(crate) is_unsafe: bool,
-    pub(crate) trait_and_impl_did: Option<(DefId, DefId)>,
-    /// strategies for input and output (last element is the output)
-    pub(crate) reflection_strategies: Vec<ReflectionStrategy>,
-}
-
-#[derive(PartialEq, Eq, Clone, Copy, Serialize, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Serialize, Debug, Default)]
 pub(crate) enum ReflectionStrategy {
     /// The will have a known wrapper we can use
     Proxy,
@@ -213,5 +173,6 @@ pub(crate) enum ReflectionStrategy {
     /// Use a reflection primitive i.e. 'ReflectedValue', dynamic runtime reflection
     Reflection,
     /// Either ignored via 'reflect(ignore)' or not visible
+    #[default]
     Filtered,
 }

@@ -2,49 +2,56 @@ use std::{
     borrow::Cow,
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use ::{
     bevy_app::App,
     bevy_asset::{AssetEvent, Handle, LoadState},
-    bevy_ecs::{
-        entity::Entity,
-        event::{Event, EventCursor, Events},
-        schedule::ScheduleLabel,
-        system::Command,
-        system::IntoSystem,
-        world::World,
-    },
+    bevy_ecs::{entity::Entity, system::Command, system::IntoSystem, world::World},
 };
 use anyhow::{Context, Error, anyhow};
-use bevy_app::{DynEq, FixedUpdate, Last, PostUpdate, Startup, Update};
 use bevy_asset::{AssetServer, Assets};
+use bevy_ecs::message::{Message, MessageCursor, Messages};
 use bevy_log::info;
+use bevy_mod_scripting_asset::{Language, LanguageExtensions, ScriptAsset};
+use bevy_mod_scripting_bindings::ScriptValue;
+#[cfg(feature = "lua")]
+use bevy_mod_scripting_core::pipeline::ActiveMachines;
 use bevy_mod_scripting_core::{
-    ConfigureScriptPlugin, LanguageExtensions,
-    asset::{Language, ScriptAsset},
-    bindings::{DisplayWithWorld, ScriptValue, WorldGuard},
-    commands::{AddStaticScript, RemoveStaticScript},
+    ConfigureScriptPlugin, IntoScriptPluginParams, callback_labels,
     event::{
-        CallbackLabel, IntoCallbackLabel, ScriptCallbackEvent, ScriptCallbackResponseEvent,
-        ScriptEvent,
+        CallbackLabel, IntoCallbackLabel, OnScriptLoaded, OnScriptReloaded, OnScriptUnloaded,
+        Recipients, ScriptAttachedEvent, ScriptCallbackEvent, ScriptCallbackResponseEvent,
+        ScriptDetachedEvent,
     },
     handler::event_handler,
-    script::{ContextPolicy, ScriptAttachment, ScriptComponent, ScriptContext},
+    script::{ContextPolicy, ScriptComponent, ScriptContexts},
 };
+use bevy_mod_scripting_display::DisplayProxy;
+#[cfg(feature = "lua")]
+use bevy_mod_scripting_lua::LuaScriptingPlugin;
+use bevy_mod_scripting_script::ScriptAttachment;
+use bevy_mod_scripting_test_scenario_syntax::*;
 use test_utils::test_data::setup_integration_test;
 
-use crate::{install_test_plugin, parse::*};
+use crate::install_test_plugin;
 
 const TIMEOUT_SECONDS: u64 = 10;
-pub const SCENARIO_SELF_SCRIPT_NAME: &str = "@this_script";
-pub const SCENARIO_SELF_LANGUAGE_NAME: &str = "@this_language";
 
 pub struct Scenario {
     pub steps: Vec<ScenarioStepSerialized>,
     pub context: ScenarioContext,
 }
+
+callback_labels!(
+    OnTest => "on_test",
+    OnTestPostUpdate => "on_test_post_update",
+    OnTestLast => "on_test_last",
+    CallbackA => "callback_a",
+    CallbackB => "callback_b",
+    CallbackC => "callback_c",
+);
 
 impl Scenario {
     /// Parses a scenario from a file.
@@ -123,13 +130,13 @@ impl Scenario {
 
     pub fn execute(mut self, mut app: App) -> Result<(), Error> {
         let original_steps = self.steps.clone();
-        for (i, step) in self.steps.into_iter().enumerate() {
+        for (i, step) in self.steps.iter().enumerate() {
             info!(
                 "Executing step #{i}: {}",
                 step.to_flat_string().unwrap_or_default()
             );
             self.context.current_step_no = i;
-            let parsed_step = step.parse_and_resolve(&self.context)?;
+            let parsed_step = self.parse_and_resolve(step.clone())?;
             if let Err(err) = parsed_step.execute(&mut self.context, &mut app) {
                 let error =
                     Scenario::scenario_error(&self.context.event_log, &original_steps, (i, err));
@@ -137,6 +144,217 @@ impl Scenario {
             }
         }
         Ok(())
+    }
+
+    pub fn resolve_attachment(
+        &self,
+        attachment: ScenarioAttachment,
+    ) -> Result<ScriptAttachment, Error> {
+        match attachment {
+            ScenarioAttachment::EntityScript { entity, script } => {
+                let entity = self.context.get_entity(&entity)?;
+                let script = self.context.get_script_handle(&script)?;
+                Ok(ScriptAttachment::EntityScript(entity, script))
+            }
+            ScenarioAttachment::StaticScript { script } => {
+                let script = self.context.get_script_handle(&script)?;
+                Ok(ScriptAttachment::StaticScript(script))
+            }
+        }
+    }
+
+    pub fn resolve_recipients(&self, recipients: ScenarioRecipients) -> Result<Recipients, Error> {
+        Ok(match recipients {
+            ScenarioRecipients::AllScripts => Recipients::AllScripts,
+            ScenarioRecipients::AllContexts => Recipients::AllContexts,
+            ScenarioRecipients::EntityScript { entity, script } => Recipients::ScriptEntity(
+                self.context.get_script_handle(&script)?,
+                self.context.get_entity(&entity)?,
+            ),
+            ScenarioRecipients::StaticScript { script } => {
+                Recipients::StaticScript(self.context.get_script_handle(&script)?)
+            }
+        })
+    }
+
+    pub fn resolve_label(label: ScenarioLabel) -> CallbackLabel {
+        match label {
+            ScenarioLabel::OnTest => OnTest.into(),
+            ScenarioLabel::OnTestPostUpdate => OnTestPostUpdate.into(),
+            ScenarioLabel::OnTestLast => OnTestLast.into(),
+            ScenarioLabel::CallbackA => CallbackA.into(),
+            ScenarioLabel::CallbackB => CallbackB.into(),
+            ScenarioLabel::CallbackC => CallbackC.into(),
+            ScenarioLabel::OnScriptLoaded => OnScriptLoaded.into(),
+            ScenarioLabel::OnScriptUnloaded => OnScriptUnloaded.into(),
+            ScenarioLabel::OnScriptReloaded => OnScriptReloaded.into(),
+        }
+    }
+
+    pub fn resolve_context_policy(context_policy: Option<ContextMode>) -> ContextPolicy {
+        match context_policy {
+            Some(ContextMode::Global) => ContextPolicy::shared(),
+            Some(ContextMode::PerEntity) => ContextPolicy::per_entity(),
+            Some(ContextMode::PerEntityPerScript) => ContextPolicy::per_entity_and_script(),
+            None => ContextPolicy::default(),
+        }
+    }
+
+    pub fn parse_and_resolve(&self, step: ScenarioStepSerialized) -> Result<ScenarioStep, Error> {
+        Ok(match step {
+            ScenarioStepSerialized::AssertContextState { attachment, state } => {
+                ScenarioStep::AssertContextState {
+                    attachment: self.resolve_attachment(attachment)?,
+                    state,
+                }
+            }
+            ScenarioStepSerialized::SetNanosecondsBudget { nanoseconds_budget } => {
+                ScenarioStep::SetNanosecondsBudget { nanoseconds_budget }
+            }
+            ScenarioStepSerialized::FinalizeApp => ScenarioStep::FinalizeApp,
+            ScenarioStepSerialized::AssertContextResidents {
+                script,
+                residents_num,
+            } => ScenarioStep::AssertContextResidents {
+                script: self.resolve_attachment(script)?,
+                residents_num,
+            },
+            ScenarioStepSerialized::AttachStaticScript { script } => {
+                ScenarioStep::AttachStaticScript {
+                    script: self.context.get_script_handle(&script)?,
+                }
+            }
+            ScenarioStepSerialized::DetachStaticScript { script } => {
+                ScenarioStep::DetachStaticScript {
+                    script: self.context.get_script_handle(&script)?,
+                }
+            }
+            ScenarioStepSerialized::SetCurrentLanguage { language } => {
+                ScenarioStep::SetCurrentLanguage {
+                    language: Self::parse_language(language),
+                }
+            }
+            ScenarioStepSerialized::InstallPlugin {
+                context_policy,
+                emit_responses,
+                nanoseconds_budget,
+            } => ScenarioStep::InstallPlugin {
+                context_policy: Self::resolve_context_policy(context_policy),
+                emit_responses: emit_responses.unwrap_or(false),
+                nanoseconds_budget,
+            },
+            ScenarioStepSerialized::DropScriptAsset { script } => ScenarioStep::DropScriptAsset {
+                script: self.context.get_script_handle(&script)?,
+            },
+            ScenarioStepSerialized::RunUpdateOnce => ScenarioStep::RunUpdateOnce,
+            ScenarioStepSerialized::EmitScriptCallbackEvent {
+                label,
+                recipients,
+                language,
+                emit_response,
+                string_value,
+            } => {
+                let label = Self::resolve_label(label.clone());
+                let recipients = self.resolve_recipients(recipients.clone())?;
+                let language = language.map(Self::parse_language);
+                let payload = string_value
+                    .map(|s| vec![ScriptValue::String(s.into())])
+                    .unwrap_or(vec![]);
+                let mut event = ScriptCallbackEvent::new(label, payload, recipients, language);
+                if emit_response {
+                    event = event.with_response();
+                }
+                ScenarioStep::EmitScriptCallbackEvent { event }
+            }
+            ScenarioStepSerialized::AssertCallbackSuccess {
+                label,
+                attachment,
+                expect_string_value,
+                language,
+            } => ScenarioStep::AssertCallbackSuccess {
+                label: Self::resolve_label(label.clone()),
+                script: self.resolve_attachment(attachment)?,
+                expect_string_value,
+                language: language.map(Self::parse_language),
+            },
+            ScenarioStepSerialized::SetupHandler { schedule, label } => {
+                ScenarioStep::SetupHandler {
+                    schedule,
+                    label: Self::resolve_label(label),
+                }
+            }
+            ScenarioStepSerialized::LoadScriptAs { path, as_name } => ScenarioStep::LoadScriptAs {
+                path,
+                as_name: as_name.to_string(),
+            },
+            ScenarioStepSerialized::WaitForScriptAssetLoaded { name } => {
+                ScenarioStep::WaitForScriptAssetLoaded {
+                    script: self.context.get_script_handle(&name)?,
+                }
+            }
+            ScenarioStepSerialized::SpawnEntityWithScript { name, script } => {
+                ScenarioStep::SpawnEntityWithScript {
+                    script: self.context.get_script_handle(&script)?,
+                    entity: name,
+                }
+            }
+            ScenarioStepSerialized::ReloadScriptFrom { script, path } => {
+                ScenarioStep::ReloadScriptFrom {
+                    script: self.context.get_script_handle(&script)?,
+                    path,
+                }
+            }
+            ScenarioStepSerialized::AssertNoCallbackResponsesEmitted => {
+                ScenarioStep::AssertNoCallbackResponsesEmitted
+            }
+            ScenarioStepSerialized::DespawnEntity { entity } => ScenarioStep::DespawnEntity {
+                entity: self.context.get_entity(&entity)?,
+            },
+            ScenarioStepSerialized::Comment { comment } => ScenarioStep::Comment { comment },
+        })
+    }
+
+    pub fn parse_language(language: ScenarioLanguage) -> Language {
+        match language {
+            ScenarioLanguage::Lua => Language::Lua,
+            ScenarioLanguage::Rhai => Language::Rhai,
+            ScenarioLanguage::ThisScriptLanguage => Language::External {
+                name: SCENARIO_SELF_LANGUAGE_NAME.into(),
+                one_indexed: false,
+            },
+        }
+    }
+
+    pub fn add_handler<T: IntoCallbackLabel + 'static>(
+        schedule: ScenarioSchedule,
+        language: Option<Language>,
+        app: &mut App,
+    ) {
+        let language = language.unwrap_or(Language::External {
+            name: "Unset language".into(),
+            one_indexed: false,
+        });
+        match language {
+            #[cfg(feature = "lua")]
+            Language::Lua => {
+                let system = IntoSystem::into_system(
+                    event_handler::<T, bevy_mod_scripting_lua::LuaScriptingPlugin>,
+                )
+                .with_name(T::into_callback_label().to_string());
+                app.add_systems(schedule.clone(), system);
+            }
+            #[cfg(feature = "rhai")]
+            Language::Rhai => {
+                let system = IntoSystem::into_system(
+                    event_handler::<T, bevy_mod_scripting_rhai::RhaiScriptingPlugin>,
+                )
+                .with_name(T::into_callback_label().to_string());
+                app.add_systems(schedule.clone(), system);
+            }
+            _ => {
+                panic!("Unsupported language for scenario schedule: {language:?}");
+            }
+        }
     }
 }
 
@@ -156,23 +374,34 @@ pub struct ScenarioContext {
 #[derive(Debug, Clone, Default)]
 pub struct InterestingEventWatcher {
     pub events: Vec<(String, usize)>,
-    pub asset_event_cursor: EventCursor<AssetEvent<ScriptAsset>>,
-    pub script_events_cursor: EventCursor<ScriptEvent>,
-    pub script_response_cursor: EventCursor<ScriptCallbackResponseEvent>,
+    pub asset_event_cursor: MessageCursor<AssetEvent<ScriptAsset>>,
+    pub script_attached_events_cursor: MessageCursor<ScriptAttachedEvent>,
+    pub script_detached_events_cursor: MessageCursor<ScriptDetachedEvent>,
+    pub script_response_cursor: MessageCursor<ScriptCallbackResponseEvent>,
     pub script_responses_queue: VecDeque<ScriptCallbackResponseEvent>,
 }
 
 impl InterestingEventWatcher {
     pub fn log_events(&mut self, step_no: usize, world: &World) {
-        let asset_events = world.resource::<Events<AssetEvent<ScriptAsset>>>();
-        let script_events = world.resource::<Events<ScriptEvent>>();
-        let script_responses = world.resource::<Events<ScriptCallbackResponseEvent>>();
+        let asset_events = world.resource::<Messages<AssetEvent<ScriptAsset>>>();
+        let script_attached_events = world.resource::<Messages<ScriptAttachedEvent>>();
+        let script_detached_events = world.resource::<Messages<ScriptDetachedEvent>>();
+        let script_responses = world.resource::<Messages<ScriptCallbackResponseEvent>>();
         let mut tracked_with_id = Vec::default();
         for (event, id) in self.asset_event_cursor.read_with_id(asset_events) {
             tracked_with_id.push((id.id, format!("AssetEvent : {event:?}")));
         }
-        for (event, id) in self.script_events_cursor.read_with_id(script_events) {
-            tracked_with_id.push((id.id, format!("ScriptEvent: {event:?}")));
+        for (event, id) in self
+            .script_attached_events_cursor
+            .read_with_id(script_attached_events)
+        {
+            tracked_with_id.push((id.id, format!("ScriptAttachedEvent: {event:?}")));
+        }
+        for (event, id) in self
+            .script_detached_events_cursor
+            .read_with_id(script_detached_events)
+        {
+            tracked_with_id.push((id.id, format!("ScriptDetachedEvent: {event:?}")));
         }
         let mut script_responses_by_id = Vec::default();
         for (event, id) in self.script_response_cursor.read_with_id(script_responses) {
@@ -240,68 +469,6 @@ impl ScenarioContext {
     }
 }
 
-impl ScenarioSchedule {
-    pub fn add_handler<T: IntoCallbackLabel + 'static>(
-        &self,
-        language: Option<Language>,
-        app: &mut App,
-    ) {
-        let language = language.unwrap_or(Language::External("Unset language".into()));
-        match language {
-            #[cfg(feature = "lua")]
-            Language::Lua => {
-                let system = IntoSystem::into_system(
-                    event_handler::<T, bevy_mod_scripting_lua::LuaScriptingPlugin>,
-                )
-                .with_name(T::into_callback_label().to_string());
-                app.add_systems(self.clone(), system);
-            }
-            #[cfg(feature = "rhai")]
-            Language::Rhai => {
-                let system = IntoSystem::into_system(
-                    event_handler::<T, bevy_mod_scripting_rhai::RhaiScriptingPlugin>,
-                )
-                .with_name(T::into_callback_label().to_string());
-                app.add_systems(self.clone(), system);
-            }
-            _ => {
-                panic!("Unsupported language for scenario schedule: {language:?}");
-            }
-        }
-    }
-}
-impl ScheduleLabel for ScenarioSchedule {
-    fn dyn_clone(&self) -> Box<dyn ScheduleLabel> {
-        match self {
-            ScenarioSchedule::Startup => Startup.dyn_clone(),
-            ScenarioSchedule::Update => Update.dyn_clone(),
-            ScenarioSchedule::FixedUpdate => FixedUpdate.dyn_clone(),
-            ScenarioSchedule::PostUpdate => PostUpdate.dyn_clone(),
-            ScenarioSchedule::Last => Last.dyn_clone(),
-        }
-    }
-
-    fn as_dyn_eq(&self) -> &dyn DynEq {
-        match self {
-            ScenarioSchedule::Startup => Startup.as_dyn_eq(),
-            ScenarioSchedule::Update => Update.as_dyn_eq(),
-            ScenarioSchedule::FixedUpdate => FixedUpdate.as_dyn_eq(),
-            ScenarioSchedule::PostUpdate => PostUpdate.as_dyn_eq(),
-            ScenarioSchedule::Last => Last.as_dyn_eq(),
-        }
-    }
-
-    fn dyn_hash(&self, state: &mut dyn ::core::hash::Hasher) {
-        match self {
-            ScenarioSchedule::Startup => Startup.dyn_hash(state),
-            ScenarioSchedule::Update => Update.dyn_hash(state),
-            ScenarioSchedule::FixedUpdate => FixedUpdate.dyn_hash(state),
-            ScenarioSchedule::PostUpdate => PostUpdate.dyn_hash(state),
-            ScenarioSchedule::Last => Last.dyn_hash(state),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub enum ScenarioStep {
     /// A comment in the scenario, ignored during execution.
@@ -312,6 +479,7 @@ pub enum ScenarioStep {
     InstallPlugin {
         context_policy: ContextPolicy,
         emit_responses: bool,
+        nanoseconds_budget: Option<u64>,
     },
     /// Finalizes the app, cleaning up resources and preparing for the next steps.
     FinalizeApp,
@@ -340,7 +508,7 @@ pub enum ScenarioStep {
         as_name: String,
     },
     /// Waits until the script with the given name is loaded.
-    WaitForScriptLoaded {
+    WaitForScriptAssetLoaded {
         script: Handle<ScriptAsset>,
     },
     /// Spawns an entity with the given name and attaches the given script to it.
@@ -393,6 +561,14 @@ pub enum ScenarioStep {
     DespawnEntity {
         entity: Entity,
     },
+    /// Asserts that the context corresponding to this attachment is in the given state
+    AssertContextState {
+        attachment: ScriptAttachment,
+        state: ScenarioContextState,
+    },
+    SetNanosecondsBudget {
+        nanoseconds_budget: Option<u64>,
+    },
 }
 
 /// Execution
@@ -401,6 +577,7 @@ impl ScenarioStep {
         context: &mut ScenarioContext,
         app: &mut App,
     ) -> Result<(), Error> {
+        bevy_log::info!("Executing all schedules");
         app.update();
 
         // add watched events
@@ -408,8 +585,7 @@ impl ScenarioStep {
         context.event_log.log_events(context.current_step_no, world);
         if context.scenario_time_started.elapsed().as_secs() > TIMEOUT_SECONDS {
             return Err(anyhow!(
-                "Test scenario timed out after {} seconds",
-                TIMEOUT_SECONDS
+                "Test scenario timed out after {TIMEOUT_SECONDS} seconds",
             ));
         }
         Ok(())
@@ -417,7 +593,7 @@ impl ScenarioStep {
 
     /// Will execute the app update loop until an event of type `T` is received or we timeout.
     pub fn execute_until_event<
-        T: Event + Clone,
+        T: Message + Clone,
         E,
         F: Fn(&T) -> bool,
         G: Fn(&World) -> Option<E>,
@@ -427,11 +603,11 @@ impl ScenarioStep {
         filter: F,
         early_exit: G,
     ) -> Result<Result<Vec<T>, E>, Error> {
-        let mut event_cursor = EventCursor::<T>::default();
+        let mut event_cursor = MessageCursor::<T>::default();
         loop {
             {
                 let world = app.world_mut();
-                let events = world.resource::<Events<T>>();
+                let events = world.resource::<Messages<T>>();
 
                 let events = event_cursor
                     .read(events)
@@ -453,7 +629,7 @@ impl ScenarioStep {
     pub fn execute(self, context: &mut ScenarioContext, app: &mut App) -> Result<(), Error> {
         match self {
             ScenarioStep::SetCurrentLanguage { language } => {
-                let language = if language == Language::External(SCENARIO_SELF_LANGUAGE_NAME.into())
+                let language = if matches!(&language, Language::External { name, .. } if name == SCENARIO_SELF_LANGUAGE_NAME)
                 {
                     // main script language can be gotten from the "this_script_asset_relative_path"
                     let extension = context
@@ -466,8 +642,7 @@ impl ScenarioStep {
                         Some(language) => language.clone(),
                         None => {
                             return Err(anyhow!(
-                                "Unknown script language for extension: {}",
-                                extension
+                                "Unknown script language for extension: {extension}",
                             ));
                         }
                     }
@@ -489,27 +664,41 @@ impl ScenarioStep {
             ScenarioStep::InstallPlugin {
                 context_policy,
                 emit_responses,
+                nanoseconds_budget,
             } => {
                 if !context.initialized_app {
                     *app = setup_integration_test(|_, _| {});
                     install_test_plugin(app, true);
                     context.initialized_app = true;
                 }
-
                 match context.current_script_language {
                     #[cfg(feature = "lua")]
                     Some(Language::Lua) => {
+                        use bevy_mod_scripting_core::pipeline::ScriptLoadingPipeline;
+                        use std::time::Duration;
+                        let mut pipeline = ScriptLoadingPipeline::default();
+                        if let Some(budget) = nanoseconds_budget {
+                            pipeline.time_budget = Some(Duration::from_nanos(budget));
+                        }
                         let plugin = crate::make_test_lua_plugin();
                         let plugin = plugin
                             .set_context_policy(context_policy)
+                            .set_pipeline_settings(pipeline)
                             .emit_core_callback_responses(emit_responses);
                         app.add_plugins(plugin);
                     }
                     #[cfg(feature = "rhai")]
                     Some(Language::Rhai) => {
+                        use bevy_mod_scripting_core::pipeline::ScriptLoadingPipeline;
+                        use std::time::Duration;
+                        let mut pipeline = ScriptLoadingPipeline::default();
+                        if let Some(budget) = nanoseconds_budget {
+                            pipeline.time_budget = Some(Duration::from_millis(budget));
+                        }
                         let plugin = crate::make_test_rhai_plugin();
                         let plugin = plugin
                             .set_context_policy(context_policy)
+                            .set_pipeline_settings(pipeline)
                             .emit_core_callback_responses(emit_responses);
                         app.add_plugins(plugin);
                     }
@@ -543,12 +732,11 @@ impl ScenarioStep {
                     .insert(as_name.to_string(), script_handle);
 
                 info!(
-                    "Script '{}' marked for loading from path '{}'",
-                    as_name,
+                    "Script '{as_name}' marked for loading from path '{}'",
                     path.display()
                 );
             }
-            ScenarioStep::WaitForScriptLoaded { script } => {
+            ScenarioStep::WaitForScriptAssetLoaded { script } => {
                 let res = Self::execute_until_event::<AssetEvent<ScriptAsset>, _, _, _>(
                     context,
                     app,
@@ -567,33 +755,45 @@ impl ScenarioStep {
                     return Err(anyhow!("Failed to load script: {e}"));
                 }
 
-                info!("Script '{}' loaded successfully", script.id());
+                info!("Script '{}' loaded successfully", script.display());
             }
-            ScenarioStep::SetupHandler { schedule, label } => {
-                match label.to_string().as_str() {
-                    "on_test" => {
-                        schedule.add_handler::<OnTest>(context.current_script_language.clone(), app)
-                    }
-                    "on_test_post_update" => schedule.add_handler::<OnTestPostUpdate>(
-                        context.current_script_language.clone(),
-                        app,
-                    ),
-                    "on_test_last" => schedule
-                        .add_handler::<OnTestLast>(context.current_script_language.clone(), app),
-                    "callback_a" => schedule
-                        .add_handler::<CallbackA>(context.current_script_language.clone(), app),
-                    "callback_b" => schedule
-                        .add_handler::<CallbackB>(context.current_script_language.clone(), app),
-                    "callback_c" => schedule
-                        .add_handler::<CallbackC>(context.current_script_language.clone(), app),
-                    _ => {
-                        return Err(anyhow!(
-                            "callback label: {} is not allowed, you can only use one of a set of labels",
-                            label
-                        ));
-                    }
+            ScenarioStep::SetupHandler { schedule, label } => match label.to_string().as_str() {
+                "on_test" => Scenario::add_handler::<OnTest>(
+                    schedule,
+                    context.current_script_language.clone(),
+                    app,
+                ),
+                "on_test_post_update" => Scenario::add_handler::<OnTestPostUpdate>(
+                    schedule,
+                    context.current_script_language.clone(),
+                    app,
+                ),
+                "on_test_last" => Scenario::add_handler::<OnTestLast>(
+                    schedule,
+                    context.current_script_language.clone(),
+                    app,
+                ),
+                "callback_a" => Scenario::add_handler::<CallbackA>(
+                    schedule,
+                    context.current_script_language.clone(),
+                    app,
+                ),
+                "callback_b" => Scenario::add_handler::<CallbackB>(
+                    schedule,
+                    context.current_script_language.clone(),
+                    app,
+                ),
+                "callback_c" => Scenario::add_handler::<CallbackC>(
+                    schedule,
+                    context.current_script_language.clone(),
+                    app,
+                ),
+                _ => {
+                    return Err(anyhow!(
+                        "callback label: {label} is not allowed, you can only use one of a set of labels",
+                    ));
                 }
-            }
+            },
             ScenarioStep::SpawnEntityWithScript {
                 entity: name,
                 script,
@@ -604,10 +804,13 @@ impl ScenarioStep {
                     .id();
 
                 context.entities.insert(name.to_string(), entity);
-                info!("Spawned entity '{}' with script '{}'", entity, script.id());
+                info!(
+                    "Spawned entity '{entity}' with script '{}'",
+                    script.display()
+                );
             }
             ScenarioStep::EmitScriptCallbackEvent { event } => {
-                app.world_mut().send_event(event.clone());
+                app.world_mut().write_message(event.clone());
             }
             ScenarioStep::AssertCallbackSuccess {
                 label,
@@ -621,51 +824,33 @@ impl ScenarioStep {
                     let language_correct = language.is_none_or(|l| l == event.language);
                     if event.label != label || event.context_key != script || !language_correct {
                         return Err(anyhow!(
-                            "Callback '{}' for attachment: '{}' was not the next event, found: {:?}. Order of events was incorrect.",
-                            label,
-                            script.to_string(),
-                            event
+                            "Callback '{label}' for attachment: '{script}' was not the next event, found: {event:?}. Order of events was incorrect."
                         ));
                     }
 
                     match &event.response {
                         Ok(val) => {
                             info!(
-                                "Callback '{}' for attachment: '{}' succeeded, with value: {:?}",
-                                label,
-                                script.to_string(),
-                                &val
+                                "Callback '{label}' for attachment: '{script}' succeeded, with value: {val:?}"
                             );
 
-                            if let Some(expected_string) = expect_string_value.as_ref() {
-                                if ScriptValue::String(Cow::Owned(expected_string.clone())) != *val
-                                {
-                                    return Err(anyhow!(
-                                        "Callback '{}' for attachment: '{}' expected: {}, but got: {}",
-                                        label,
-                                        script.to_string(),
-                                        expected_string,
-                                        val.display_with_world(WorldGuard::new_exclusive(
-                                            app.world_mut()
-                                        ))
-                                    ));
-                                }
+                            if let Some(expected_string) = expect_string_value.as_ref()
+                                && ScriptValue::String(Cow::Owned(expected_string.clone())) != *val
+                            {
+                                return Err(anyhow!(
+                                    "Callback '{label}' for attachment: '{script}' expected: {expected_string}, but got: {val:#?}",
+                                ));
                             }
                         }
                         Err(e) => {
                             return Err(anyhow!(
-                                "Callback '{}' for attachment: '{}' failed with error: {}",
-                                label,
-                                script.to_string(),
-                                e.display_with_world(WorldGuard::new_exclusive(app.world_mut()))
+                                "Callback '{label}' for attachment: '{script}' failed with error: {e:#?}",
                             ));
                         }
                     }
                 } else {
                     return Err(anyhow!(
-                        "No callback response event found for label: {} and attachment: {}",
-                        label,
-                        script.to_string()
+                        "No callback response event found for label: {label} and attachment: {script}"
                     ));
                 }
             }
@@ -678,7 +863,7 @@ impl ScenarioStep {
                     .iter_mut()
                     .find_map(|(name, handle)| {
                         if handle.id() == script.id() {
-                            *handle = handle.clone_weak();
+                            *handle = handle.clone();
                             Some(name.clone())
                         } else {
                             None
@@ -690,7 +875,7 @@ impl ScenarioStep {
                             script.id()
                         )
                     })?;
-                info!("Dropped script asset '{}' from context", name);
+                info!("Dropped script asset '{name}' from context");
             }
             ScenarioStep::ReloadScriptFrom { script, path } => {
                 let mut assets = app.world_mut().resource_mut::<Assets<ScriptAsset>>();
@@ -718,8 +903,7 @@ impl ScenarioStep {
                 let next_event = context.event_log.script_responses_queue.pop_front();
                 if next_event.is_some() {
                     return Err(anyhow!(
-                        "Expected no callback responses to be emitted, but found: {:?}",
-                        next_event
+                        "Expected no callback responses to be emitted, but found: {next_event:?}"
                     ));
                 } else {
                     info!("No callback responses emitted as expected");
@@ -729,19 +913,71 @@ impl ScenarioStep {
                 let success = app.world_mut().despawn(entity);
                 if !success {
                     return Err(anyhow!(
-                        "Failed to despawn entity with name '{}'. It may not exist.",
-                        entity
+                        "Failed to despawn entity with name '{entity}'. It may not exist.",
                     ));
                 } else {
-                    info!("Despawning entity with name '{}'", entity);
+                    info!("Despawning entity with name '{entity}'",);
                 }
             }
             ScenarioStep::AttachStaticScript { script } => {
-                AddStaticScript::new(script.clone()).apply(app.world_mut());
+                match context.current_script_language {
+                    #[cfg(feature = "lua")]
+                    Some(Language::Lua) => {
+                        use bevy_mod_scripting_core::commands::AttachScript;
+
+                        AttachScript::<bevy_mod_scripting_lua::LuaScriptingPlugin>::new(
+                            ScriptAttachment::StaticScript(script.clone()),
+                        )
+                        .apply(app.world_mut());
+                    }
+                    #[cfg(feature = "rhai")]
+                    Some(Language::Rhai) => {
+                        use bevy_mod_scripting_core::commands::AttachScript;
+
+                        AttachScript::<bevy_mod_scripting_rhai::RhaiScriptingPlugin>::new(
+                            ScriptAttachment::StaticScript(script.clone()),
+                        )
+                        .apply(app.world_mut())
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "Scenario step AttachStaticScript is not supported for the current plugin type: '{:?}'",
+                            context.current_script_language
+                        ));
+                    }
+                }
+
                 info!("Attached static script with handle: {}", script.id());
             }
             ScenarioStep::DetachStaticScript { script } => {
-                RemoveStaticScript::new(script.clone()).apply(app.world_mut());
+                match context.current_script_language {
+                    #[cfg(feature = "lua")]
+                    Some(Language::Lua) => {
+                        use bevy_mod_scripting_core::commands::DetachScript;
+
+                        DetachScript::<bevy_mod_scripting_lua::LuaScriptingPlugin>::new(
+                            ScriptAttachment::StaticScript(script.clone()),
+                        )
+                        .apply(app.world_mut());
+                    }
+                    #[cfg(feature = "rhai")]
+                    Some(Language::Rhai) => {
+                        use bevy_mod_scripting_core::commands::DetachScript;
+
+                        DetachScript::<bevy_mod_scripting_rhai::RhaiScriptingPlugin>::new(
+                            ScriptAttachment::StaticScript(script.clone()),
+                        )
+                        .apply(app.world_mut())
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "Scenario step DetachStaticScript is not supported for the current plugin type: '{:?}'",
+                            context.current_script_language
+                        ));
+                    }
+                }
+
+                info!("Attached static script with handle: {}", script.id());
                 info!("Detached static script with handle: {}", script.id());
             }
             ScenarioStep::AssertContextResidents {
@@ -752,11 +988,13 @@ impl ScenarioStep {
                 let residents = match context.current_script_language {
                     #[cfg(feature = "lua")]
                     Some(Language::Lua) => world
-                        .resource::<ScriptContext<bevy_mod_scripting_lua::LuaScriptingPlugin>>()
+                        .resource::<ScriptContexts<bevy_mod_scripting_lua::LuaScriptingPlugin>>()
+                        .read()
                         .residents_len(&script),
                     #[cfg(feature = "rhai")]
                     Some(Language::Rhai) => world
-                        .resource::<ScriptContext<bevy_mod_scripting_rhai::RhaiScriptingPlugin>>()
+                        .resource::<ScriptContexts<bevy_mod_scripting_rhai::RhaiScriptingPlugin>>()
+                        .read()
                         .residents_len(&script),
                     _ => {
                         return Err(anyhow!(
@@ -768,22 +1006,96 @@ impl ScenarioStep {
 
                 if residents != residents_num {
                     return Err(anyhow!(
-                        "Expected {} residents for script attachment: {}, but found {}",
-                        residents_num,
-                        script.to_string(),
-                        residents
+                        "Expected {residents_num} residents for script attachment: {script}, but found {residents}",
                     ));
                 } else {
-                    info!(
-                        "Script attachment: {} has {} residents as expected",
-                        script.to_string(),
-                        residents
-                    );
+                    info!("Script attachment: {script} has {residents} residents as expected",);
                 }
             }
             ScenarioStep::Comment { comment } => {
                 // Comments are ignored, do nothing, log it though for debugging
-                info!("Comment: {}", comment);
+                info!("Comment: {comment}");
+            }
+            ScenarioStep::AssertContextState {
+                attachment: script,
+                state,
+            } => {
+                let world = app.world_mut();
+
+                fn context_to_state<P: IntoScriptPluginParams>(
+                    ctxt: bevy_mod_scripting_core::script::Context<P>,
+                ) -> ScenarioContextState {
+                    match ctxt {
+                        bevy_mod_scripting_core::script::Context::LoadedAndActive(_) => {
+                            ScenarioContextState::LoadedAndActive
+                        }
+                        bevy_mod_scripting_core::script::Context::Loading => {
+                            ScenarioContextState::Loading
+                        }
+                        bevy_mod_scripting_core::script::Context::Unloading(_) => {
+                            ScenarioContextState::Unloading
+                        }
+                        bevy_mod_scripting_core::script::Context::Reloading(_) => {
+                            ScenarioContextState::Reloading
+                        }
+                    }
+                }
+
+                let got_state = match context.current_script_language {
+                    #[cfg(feature = "lua")]
+                    Some(Language::Lua) => world
+                        .resource::<ScriptContexts<bevy_mod_scripting_lua::LuaScriptingPlugin>>()
+                        .read()
+                        .get_context(&script)
+                        .map(context_to_state),
+                    #[cfg(feature = "rhai")]
+                    Some(Language::Rhai) => world
+                        .resource::<ScriptContexts<bevy_mod_scripting_rhai::RhaiScriptingPlugin>>()
+                        .read()
+                        .get_context(&script)
+                        .map(context_to_state),
+                    _ => {
+                        return Err(anyhow!(
+                            "Scenario step AssertContextState is not supported for the current plugin type: '{:?}'",
+                            context.current_script_language
+                        ));
+                    }
+                };
+
+                if got_state != Some(state.clone()) {
+                    return Err(anyhow!(
+                        "Expected {state:?} state for script attachment: {script}, but found {got_state:?}",
+                    ));
+                } else {
+                    info!("Script attachment: {script} context has state {state:?} as expected",);
+                }
+            }
+            ScenarioStep::SetNanosecondsBudget { nanoseconds_budget } => {
+                let nanoseconds_budget = nanoseconds_budget.map(Duration::from_nanos);
+                match context.current_script_language {
+                    #[cfg(feature = "lua")]
+                    Some(Language::Lua) => {
+                        let mut machines = app
+                            .world_mut()
+                            .get_resource_mut::<ActiveMachines<LuaScriptingPlugin>>()
+                            .unwrap();
+                        machines.budget = nanoseconds_budget;
+                    }
+                    #[cfg(feature = "rhai")]
+                    Some(Language::Rhai) => {
+                        let mut machines = app
+                            .world_mut()
+                            .get_resource_mut::<ActiveMachines<LuaScriptingPlugin>>()
+                            .unwrap();
+                        machines.budget = nanoseconds_budget;
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "Scenario step SetNanosecondsBudget is not supported for the current plugin type: '{:?}'",
+                            context.current_script_language
+                        ));
+                    }
+                }
             }
         }
         Ok(())

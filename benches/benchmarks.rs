@@ -2,7 +2,7 @@ extern crate bevy_mod_scripting;
 extern crate script_integration_test_harness;
 extern crate test_utils;
 use bevy_platform::collections::HashMap;
-use std::{path::PathBuf, sync::LazyLock, time::Duration};
+use std::{collections::VecDeque, path::PathBuf, sync::LazyLock, time::Duration};
 
 use bevy::{
     log::{
@@ -10,9 +10,7 @@ use bevy::{
     },
     reflect::Reflect,
 };
-use bevy_mod_scripting_core::bindings::{
-    FromScript, IntoScript, Mut, Ref, ReflectReference, ScriptValue, Val,
-};
+use bevy_mod_scripting_bindings::{FromScript, IntoScript, M, R, ReflectReference, ScriptValue, V};
 use criterion::{
     BatchSize, BenchmarkFilter, BenchmarkGroup, Criterion, criterion_main, measurement::Measurement,
 };
@@ -175,9 +173,9 @@ fn conversion_benchmarks(criterion: &mut Criterion) {
     perform_benchmark_with_generator(
         "ScriptValue::List",
         &|rng, _| {
-            let mut array = Vec::new();
+            let mut array = VecDeque::new();
             for _ in 0..10 {
-                array.push(ScriptValue::Integer(rng.random()));
+                array.push_back(ScriptValue::Integer(rng.random()));
             }
             ScriptValue::List(array)
         },
@@ -226,10 +224,10 @@ fn conversion_benchmarks(criterion: &mut Criterion) {
 
     perform_benchmark_with_generator(
         "Val<T>::from_into",
-        &|rng, _| Val::new(ReflectyVal(rng.random::<u32>())),
+        &|rng, _| V::new(ReflectyVal(rng.random::<u32>())),
         &|w, i| {
             let v = i.into_script(w.clone()).unwrap();
-            Val::<ReflectyVal>::from_script(v, w).unwrap();
+            V::<ReflectyVal>::from_script(v, w).unwrap();
         },
         &mut group,
         BatchSize::SmallInput,
@@ -238,12 +236,12 @@ fn conversion_benchmarks(criterion: &mut Criterion) {
     perform_benchmark_with_generator(
         "Ref<T>::from",
         &|rng, w| {
-            Val::new(ReflectyVal(rng.random::<u32>()))
+            V::new(ReflectyVal(rng.random::<u32>()))
                 .into_script(w)
                 .unwrap()
         },
         &|w, i| {
-            Ref::<ReflectyVal>::from_script(i, w).unwrap();
+            R::<ReflectyVal>::from_script(i, w).unwrap();
         },
         &mut group,
         BatchSize::SmallInput,
@@ -252,12 +250,12 @@ fn conversion_benchmarks(criterion: &mut Criterion) {
     perform_benchmark_with_generator(
         "Mut<T>::from",
         &|rng, w| {
-            Val::new(ReflectyVal(rng.random::<u32>()))
+            V::new(ReflectyVal(rng.random::<u32>()))
                 .into_script(w)
                 .unwrap()
         },
         &|w, i| {
-            Mut::<ReflectyVal>::from_script(i, w).unwrap();
+            M::<ReflectyVal>::from_script(i, w).unwrap();
         },
         &mut group,
         BatchSize::SmallInput,
@@ -266,22 +264,13 @@ fn conversion_benchmarks(criterion: &mut Criterion) {
 
 fn script_load_benchmarks(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("loading");
-    let reload_probability = 0.5;
     // lua
-    let plugin = make_test_lua_plugin();
     let content = include_str!("../assets/macro_benchmarks/loading/empty.lua");
-    run_plugin_script_load_benchmark(plugin, "empty Lua", content, &mut group, reload_probability);
+    run_plugin_script_load_benchmark(make_test_lua_plugin, "empty Lua", content, &mut group);
 
     // rhai
-    let plugin = make_test_rhai_plugin();
     let content = include_str!("../assets/macro_benchmarks/loading/empty.rhai");
-    run_plugin_script_load_benchmark(
-        plugin,
-        "empty Rhai",
-        content,
-        &mut group,
-        reload_probability,
-    );
+    run_plugin_script_load_benchmark(make_test_rhai_plugin, "empty Rhai", content, &mut group);
 }
 
 pub fn benches() {

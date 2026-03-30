@@ -1,40 +1,31 @@
 [package]
 name = "bevy_color_bms_bindings"
-version = "0.15.1"
-edition = "2024"
-authors = ["Maksymilian Mozolewski <makspl17@gmail.com>"]
-license = "MIT OR Apache-2.0"
 description = "Automatically generated bindings for bevy_color crate"
-repository = "https://github.com/makspll/bevy_mod_scripting"
-homepage = "https://github.com/makspll/bevy_mod_scripting"
-keywords = ["bevy", "gamedev", "scripting", "rhai"]
-categories = ["game-development"]
 readme = "README.md"
-
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 bevy_ecs = { workspace = true, features = ["std", "bevy_reflect"] }
 bevy_app = { workspace = true, features = ["std"] }
 bevy_mod_scripting_core = { workspace = true }
+bevy_mod_scripting_bindings = { workspace = true }
 bevy_mod_scripting_derive = { workspace = true }
-bevy_color = { version = "0.16.2", features = [
-    "wgpu-types",
-    "alloc",
-    "std",
-    "bevy_reflect",
-    "encase",
-], default-features = true }
+bevy_color = { version = "0.18.1", features = ["alloc", "bevy_reflect", "encase", "std", "wgpu-types"], default-features = true}
 
 
-bevy_math = { version = "^0.16.1", features = [
-    "alloc",
-    "std",
-], default-features = false }
+bevy_math = { version = "^0.18.0", features = ["alloc", "bevy_reflect", "curve", "rand", "std"], default-features = true}
 
-bevy_reflect = { version = "^0.16.1", features = [
-    "std",
-], default-features = false }
+bevy_reflect = { version = "^0.18.0", features = ["auto_register", "auto_register_inventory", "debug", "debug_stack", "glam", "indexmap", "smallvec", "smol_str", "std", "uuid", "wgpu-types"], default-features = true}
 
-bytemuck = { version = "^1", features = [], default-features = true }
+bytemuck = { version = "^1", features = [], default-features = true}
 
-wgpu-types = { version = "^24", features = ["std"], default-features = false }
+wgpu-types = { version = "^27", features = ["std"], default-features = false}
+
+

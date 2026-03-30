@@ -3,25 +3,25 @@
 
 use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::*;
-use bevy_mod_scripting_core::bindings::{
+use bevy_mod_scripting_bindings::{
     ReflectReference,
     function::{
-        from::{Mut, Ref, Val},
+        from::{M, R, V},
         namespace::NamespaceBuilder,
     },
 };
 use bevy_mod_scripting_derive::script_bindings;
 pub struct BevySceneScriptingPlugin;
 pub(crate) fn register_dynamic_scene_root_functions(world: &mut World) {
-    bevy_mod_scripting_core::bindings::function::namespace::NamespaceBuilder::<
-        ::bevy_scene::prelude::DynamicSceneRoot,
+    bevy_mod_scripting_bindings::function::namespace::NamespaceBuilder::<
+        ::bevy_scene::DynamicSceneRoot,
     >::new(world)
         .register_documented(
             "assert_receiver_is_total_eq",
-            |_self: Ref<::bevy_scene::prelude::DynamicSceneRoot>| {
+            |_self: R<::bevy_scene::DynamicSceneRoot>| {
                 let output: () = {
                     {
-                        let output: () = <::bevy_scene::prelude::DynamicSceneRoot as ::std::cmp::Eq>::assert_receiver_is_total_eq(
+                        let output: () = <::bevy_scene::DynamicSceneRoot as ::std::cmp::Eq>::assert_receiver_is_total_eq(
                                 &_self,
                             )
                             .into();
@@ -35,10 +35,10 @@ pub(crate) fn register_dynamic_scene_root_functions(world: &mut World) {
         )
         .register_documented(
             "clone",
-            |_self: Ref<::bevy_scene::prelude::DynamicSceneRoot>| {
-                let output: Val<::bevy_scene::prelude::DynamicSceneRoot> = {
+            |_self: R<::bevy_scene::DynamicSceneRoot>| {
+                let output: V<::bevy_scene::DynamicSceneRoot> = {
                     {
-                        let output: Val<::bevy_scene::prelude::DynamicSceneRoot> = <::bevy_scene::prelude::DynamicSceneRoot as ::std::clone::Clone>::clone(
+                        let output: V<::bevy_scene::DynamicSceneRoot> = <::bevy_scene::DynamicSceneRoot as ::std::clone::Clone>::clone(
                                 &_self,
                             )
                             .into();
@@ -53,13 +53,13 @@ pub(crate) fn register_dynamic_scene_root_functions(world: &mut World) {
         .register_documented(
             "eq",
             |
-                _self: Ref<::bevy_scene::prelude::DynamicSceneRoot>,
-                other: Ref<::bevy_scene::prelude::DynamicSceneRoot>|
+                _self: R<::bevy_scene::DynamicSceneRoot>,
+                other: R<::bevy_scene::DynamicSceneRoot>|
             {
                 let output: bool = {
                     {
-                        let output: bool = <::bevy_scene::prelude::DynamicSceneRoot as ::std::cmp::PartialEq<
-                            ::bevy_scene::prelude::DynamicSceneRoot,
+                        let output: bool = <::bevy_scene::DynamicSceneRoot as ::std::cmp::PartialEq<
+                            ::bevy_scene::DynamicSceneRoot,
                         >>::eq(&_self, &other)
                             .into();
                         output
@@ -74,20 +74,20 @@ pub(crate) fn register_dynamic_scene_root_functions(world: &mut World) {
     let mut registry = registry.write();
     registry
         .register_type_data::<
-            ::bevy_scene::prelude::DynamicSceneRoot,
-            bevy_mod_scripting_core::bindings::MarkAsGenerated,
+            ::bevy_scene::DynamicSceneRoot,
+            bevy_mod_scripting_bindings::MarkAsGenerated,
         >();
 }
 pub(crate) fn register_scene_root_functions(world: &mut World) {
-    bevy_mod_scripting_core::bindings::function::namespace::NamespaceBuilder::<
-        ::bevy_scene::prelude::SceneRoot,
+    bevy_mod_scripting_bindings::function::namespace::NamespaceBuilder::<
+        ::bevy_scene::SceneRoot,
     >::new(world)
         .register_documented(
             "assert_receiver_is_total_eq",
-            |_self: Ref<::bevy_scene::prelude::SceneRoot>| {
+            |_self: R<::bevy_scene::SceneRoot>| {
                 let output: () = {
                     {
-                        let output: () = <::bevy_scene::prelude::SceneRoot as ::std::cmp::Eq>::assert_receiver_is_total_eq(
+                        let output: () = <::bevy_scene::SceneRoot as ::std::cmp::Eq>::assert_receiver_is_total_eq(
                                 &_self,
                             )
                             .into();
@@ -101,10 +101,10 @@ pub(crate) fn register_scene_root_functions(world: &mut World) {
         )
         .register_documented(
             "clone",
-            |_self: Ref<::bevy_scene::prelude::SceneRoot>| {
-                let output: Val<::bevy_scene::prelude::SceneRoot> = {
+            |_self: R<::bevy_scene::SceneRoot>| {
+                let output: V<::bevy_scene::SceneRoot> = {
                     {
-                        let output: Val<::bevy_scene::prelude::SceneRoot> = <::bevy_scene::prelude::SceneRoot as ::std::clone::Clone>::clone(
+                        let output: V<::bevy_scene::SceneRoot> = <::bevy_scene::SceneRoot as ::std::clone::Clone>::clone(
                                 &_self,
                             )
                             .into();
@@ -118,14 +118,11 @@ pub(crate) fn register_scene_root_functions(world: &mut World) {
         )
         .register_documented(
             "eq",
-            |
-                _self: Ref<::bevy_scene::prelude::SceneRoot>,
-                other: Ref<::bevy_scene::prelude::SceneRoot>|
-            {
+            |_self: R<::bevy_scene::SceneRoot>, other: R<::bevy_scene::SceneRoot>| {
                 let output: bool = {
                     {
-                        let output: bool = <::bevy_scene::prelude::SceneRoot as ::std::cmp::PartialEq<
-                            ::bevy_scene::prelude::SceneRoot,
+                        let output: bool = <::bevy_scene::SceneRoot as ::std::cmp::PartialEq<
+                            ::bevy_scene::SceneRoot,
                         >>::eq(&_self, &other)
                             .into();
                         output
@@ -140,17 +137,17 @@ pub(crate) fn register_scene_root_functions(world: &mut World) {
     let mut registry = registry.write();
     registry
         .register_type_data::<
-            ::bevy_scene::prelude::SceneRoot,
-            bevy_mod_scripting_core::bindings::MarkAsGenerated,
+            ::bevy_scene::SceneRoot,
+            bevy_mod_scripting_bindings::MarkAsGenerated,
         >();
 }
 pub(crate) fn register_scene_instance_ready_functions(world: &mut World) {
-    bevy_mod_scripting_core::bindings::function::namespace::NamespaceBuilder::<
+    bevy_mod_scripting_bindings::function::namespace::NamespaceBuilder::<
         ::bevy_scene::SceneInstanceReady,
     >::new(world)
         .register_documented(
             "assert_receiver_is_total_eq",
-            |_self: Ref<::bevy_scene::SceneInstanceReady>| {
+            |_self: R<::bevy_scene::SceneInstanceReady>| {
                 let output: () = {
                     {
                         let output: () = <::bevy_scene::SceneInstanceReady as ::std::cmp::Eq>::assert_receiver_is_total_eq(
@@ -167,10 +164,10 @@ pub(crate) fn register_scene_instance_ready_functions(world: &mut World) {
         )
         .register_documented(
             "clone",
-            |_self: Ref<::bevy_scene::SceneInstanceReady>| {
-                let output: Val<::bevy_scene::SceneInstanceReady> = {
+            |_self: R<::bevy_scene::SceneInstanceReady>| {
+                let output: V<::bevy_scene::SceneInstanceReady> = {
                     {
-                        let output: Val<::bevy_scene::SceneInstanceReady> = <::bevy_scene::SceneInstanceReady as ::std::clone::Clone>::clone(
+                        let output: V<::bevy_scene::SceneInstanceReady> = <::bevy_scene::SceneInstanceReady as ::std::clone::Clone>::clone(
                                 &_self,
                             )
                             .into();
@@ -185,8 +182,8 @@ pub(crate) fn register_scene_instance_ready_functions(world: &mut World) {
         .register_documented(
             "eq",
             |
-                _self: Ref<::bevy_scene::SceneInstanceReady>,
-                other: Ref<::bevy_scene::SceneInstanceReady>|
+                _self: R<::bevy_scene::SceneInstanceReady>,
+                other: R<::bevy_scene::SceneInstanceReady>|
             {
                 let output: bool = {
                     {
@@ -207,69 +204,70 @@ pub(crate) fn register_scene_instance_ready_functions(world: &mut World) {
     registry
         .register_type_data::<
             ::bevy_scene::SceneInstanceReady,
-            bevy_mod_scripting_core::bindings::MarkAsGenerated,
+            bevy_mod_scripting_bindings::MarkAsGenerated,
         >();
 }
 pub(crate) fn register_instance_id_functions(world: &mut World) {
-    bevy_mod_scripting_core::bindings::function::namespace::NamespaceBuilder::<
+    bevy_mod_scripting_bindings::function::namespace::NamespaceBuilder::<
         ::bevy_scene::InstanceId,
     >::new(world)
-    .register_documented(
-        "assert_receiver_is_total_eq",
-        |_self: Ref<::bevy_scene::InstanceId>| {
-            let output: () = {
-                {
-                    let output: () =
-                        <::bevy_scene::InstanceId as ::std::cmp::Eq>::assert_receiver_is_total_eq(
-                            &_self,
-                        )
-                        .into();
-                    output
-                }
-            };
-            output
-        },
-        "",
-        &["_self"],
-    )
-    .register_documented(
-        "clone",
-        |_self: Ref<::bevy_scene::InstanceId>| {
-            let output: Val<::bevy_scene::InstanceId> = {
-                {
-                    let output: Val<::bevy_scene::InstanceId> =
-                        <::bevy_scene::InstanceId as ::std::clone::Clone>::clone(&_self).into();
-                    output
-                }
-            };
-            output
-        },
-        "",
-        &["_self"],
-    )
-    .register_documented(
-        "eq",
-        |_self: Ref<::bevy_scene::InstanceId>, other: Ref<::bevy_scene::InstanceId>| {
-            let output: bool = {
-                {
-                    let output: bool = <::bevy_scene::InstanceId as ::std::cmp::PartialEq<
-                        ::bevy_scene::InstanceId,
-                    >>::eq(&_self, &other)
-                    .into();
-                    output
-                }
-            };
-            output
-        },
-        "",
-        &["_self", "other"],
-    );
+        .register_documented(
+            "assert_receiver_is_total_eq",
+            |_self: R<::bevy_scene::InstanceId>| {
+                let output: () = {
+                    {
+                        let output: () = <::bevy_scene::InstanceId as ::std::cmp::Eq>::assert_receiver_is_total_eq(
+                                &_self,
+                            )
+                            .into();
+                        output
+                    }
+                };
+                output
+            },
+            "",
+            &["_self"],
+        )
+        .register_documented(
+            "clone",
+            |_self: R<::bevy_scene::InstanceId>| {
+                let output: V<::bevy_scene::InstanceId> = {
+                    {
+                        let output: V<::bevy_scene::InstanceId> = <::bevy_scene::InstanceId as ::std::clone::Clone>::clone(
+                                &_self,
+                            )
+                            .into();
+                        output
+                    }
+                };
+                output
+            },
+            "",
+            &["_self"],
+        )
+        .register_documented(
+            "eq",
+            |_self: R<::bevy_scene::InstanceId>, other: R<::bevy_scene::InstanceId>| {
+                let output: bool = {
+                    {
+                        let output: bool = <::bevy_scene::InstanceId as ::std::cmp::PartialEq<
+                            ::bevy_scene::InstanceId,
+                        >>::eq(&_self, &other)
+                            .into();
+                        output
+                    }
+                };
+                output
+            },
+            "",
+            &["_self", "other"],
+        );
     let registry = world.get_resource_or_init::<AppTypeRegistry>();
     let mut registry = registry.write();
     registry
         .register_type_data::<
             ::bevy_scene::InstanceId,
-            bevy_mod_scripting_core::bindings::MarkAsGenerated,
+            bevy_mod_scripting_bindings::MarkAsGenerated,
         >();
 }
 impl Plugin for BevySceneScriptingPlugin {

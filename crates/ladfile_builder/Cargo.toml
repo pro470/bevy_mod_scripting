@@ -1,16 +1,20 @@
 [package]
 name = "ladfile_builder"
-version = "0.5.1"
-edition = "2024"
-authors = ["Maksymilian Mozolewski <makspl17@gmail.com>"]
-license = "MIT OR Apache-2.0"
 description = "Language Agnostic Declaration (LAD) file format for the bevy_mod_scripting crate"
-repository = "https://github.com/makspll/bevy_mod_scripting"
-homepage = "https://github.com/makspll/bevy_mod_scripting"
-keywords = ["bevy", "gamedev", "scripting", "format", "json"]
-categories = ["game-development", "parser-implementations"]
-include = ["readme.md", "/src", "/test_assets"]
-readme = "readme.md"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+
+[features]
+default = []
+lua_language_server_files = ["lua_language_server_lad_backend"]
 
 [dependencies]
 bevy_app = { workspace = true, default-features = false, features = [] }
@@ -18,7 +22,10 @@ bevy_ecs = { workspace = true, default-features = false, features = [] }
 bevy_platform = { workspace = true, default-features = false, features = [] }
 bevy_log = { workspace = true, default-features = false, features = [] }
 bevy_mod_scripting_core = { workspace = true }
-bevy_reflect = { workspace = true, features = ["documentation"] }
+bevy_mod_scripting_bindings = { workspace = true }
+bevy_mod_scripting_bindings_domain = { workspace = true }
+bevy_reflect = { workspace = true, features = ["reflect_documentation"] }
+lua_language_server_lad_backend = { workspace = true, optional = true }
 ladfile = { workspace = true }
 regex = { workspace = true }
 

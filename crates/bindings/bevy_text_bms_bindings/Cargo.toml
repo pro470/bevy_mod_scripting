@@ -1,61 +1,49 @@
 [package]
 name = "bevy_text_bms_bindings"
-version = "0.15.1"
-edition = "2024"
-authors = ["Maksymilian Mozolewski <makspl17@gmail.com>"]
-license = "MIT OR Apache-2.0"
 description = "Automatically generated bindings for bevy_text crate"
-repository = "https://github.com/makspll/bevy_mod_scripting"
-homepage = "https://github.com/makspll/bevy_mod_scripting"
-keywords = ["bevy", "gamedev", "scripting", "rhai"]
-categories = ["game-development"]
 readme = "README.md"
-
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 
 
 bevy_mod_scripting_core = { workspace = true }
+bevy_mod_scripting_bindings = { workspace = true }
 bevy_mod_scripting_derive = { workspace = true }
-bevy_text = { version = "0.16.1", features = [
-    "default_font",
-], default-features = true }
+bevy_text = { version = "0.18.1", features = ["default_font"], default-features = true}
 
 
-bevy_app = { version = "^0.16.1", features = [], default-features = true }
+bevy_app = { version = "^0.18.0", features = ["bevy_reflect", "error_panic_hook", "reflect_auto_register", "std"], default-features = true}
 
-bevy_asset = { version = "^0.16.1", features = [], default-features = true }
+bevy_asset = { version = "^0.18.0", features = ["file_watcher", "multi_threaded", "notify-debouncer-full", "watch"], default-features = true}
 
-bevy_color = { version = "^0.16.2", features = [], default-features = true }
+bevy_color = { version = "^0.18.0", features = ["alloc", "bevy_reflect", "encase", "std", "wgpu-types"], default-features = true}
 
-bevy_derive = { version = "^0.16.1", features = [], default-features = true }
+bevy_derive = { version = "^0.18.0", features = [], default-features = true}
 
-bevy_ecs = { version = "^0.16.1", features = [], default-features = true }
+bevy_ecs = { version = "^0.18.0", features = ["async_executor", "backtrace", "bevy_reflect", "multi_threaded", "reflect_auto_register", "serialize", "std"], default-features = true}
 
-bevy_image = { version = "^0.16.1", features = [], default-features = true }
+bevy_image = { version = "^0.18.0", features = ["bevy_reflect", "hdr", "ktx2", "png", "zstd", "zstd_rust"], default-features = true}
 
-bevy_log = { version = "^0.16.1", features = [], default-features = true }
+bevy_log = { version = "^0.18.0", features = [], default-features = true}
 
-bevy_math = { version = "^0.16.1", features = [], default-features = true }
+bevy_math = { version = "^0.18.0", features = ["alloc", "bevy_reflect", "curve", "rand", "std"], default-features = true}
 
-bevy_reflect = { version = "^0.16.1", features = [], default-features = true }
+bevy_reflect = { version = "^0.18.0", features = ["auto_register", "auto_register_inventory", "debug", "debug_stack", "glam", "indexmap", "smallvec", "smol_str", "std", "uuid", "wgpu-types"], default-features = true}
 
-bevy_render = { version = "^0.16.1", features = [], default-features = true }
+bevy_utils = { version = "^0.18.0", features = ["parallel"], default-features = true}
 
-bevy_sprite = { version = "^0.16.1", features = [], default-features = true }
+cosmic-text = { version = "^0.16", features = [], default-features = true}
 
-bevy_transform = { version = "^0.16.1", features = [], default-features = true }
+serde = { version = "^1", features = [], default-features = true}
 
-bevy_utils = { version = "^0.16.1", features = [], default-features = true }
+sys-locale = { version = "^0.3.0", features = [], default-features = true}
 
-bevy_window = { version = "^0.16.1", features = [], default-features = true }
 
-cosmic-text = { version = "^0.13", features = [], default-features = true }
-
-serde = { version = "^1", features = [], default-features = true }
-
-smallvec = { version = "^1.13", features = [], default-features = true }
-
-sys-locale = { version = "^0.3.0", features = [], default-features = true }
-
-unicode-bidi = { version = "^0.3.13", features = [], default-features = true }

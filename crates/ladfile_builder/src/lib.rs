@@ -1,6 +1,28 @@
 //! Parsing definitions for the LAD (Language Agnostic Decleration) file format.
 pub mod plugin;
 
+use bevy_ecs::{
+    reflect::{ReflectComponent, ReflectResource},
+    world::World,
+};
+use bevy_log::warn;
+use bevy_mod_scripting_bindings::{
+    MarkAsCore, MarkAsGenerated, MarkAsSignificant, ReflectReference, ScriptValue,
+    docgen::{
+        TypedThrough,
+        info::FunctionInfo,
+        typed_through::{ThroughTypeInfo, TypedWrapperKind, UntypedWrapperKind},
+    },
+    function::{
+        namespace::Namespace,
+        script_function::{DynamicScriptFunction, DynamicScriptFunctionMut, FunctionCallContext},
+    },
+    into_through_type_info,
+};
+pub use bevy_mod_scripting_bindings_domain::*; // re-export the thing we use
+use bevy_platform::collections::{HashMap, HashSet};
+use bevy_reflect::{NamedField, TypeInfo, TypeRegistry, Typed, UnnamedField};
+use ladfile::*;
 use std::{
     any::TypeId,
     borrow::Cow,
@@ -9,61 +31,92 @@ use std::{
     path::PathBuf,
 };
 
-use bevy_ecs::world::World;
-use bevy_log::warn;
-use bevy_mod_scripting_core::{
-    bindings::{
-        MarkAsCore, MarkAsGenerated, MarkAsSignificant, ReflectReference,
-        function::{
-            namespace::Namespace,
-            script_function::{
-                DynamicScriptFunction, DynamicScriptFunctionMut, FunctionCallContext,
-            },
-        },
-    },
-    docgen::{
-        TypedThrough,
-        info::FunctionInfo,
-        typed_through::{ThroughTypeInfo, TypedWrapperKind, UntypedWrapperKind},
-    },
-    match_by_type,
-};
-use bevy_platform::collections::{HashMap, HashSet};
-use bevy_reflect::{NamedField, TypeInfo, TypeRegistry, Typed, UnnamedField};
-use ladfile::*;
-
 /// We can assume that the types here will be either primitives
 /// or reflect types, as the rest will be covered by typed wrappers
 /// so just check
-fn primitive_from_type_id(type_id: TypeId) -> Option<LadBMSPrimitiveKind> {
-    match_by_type!(match type_id {
-        i: bool => return Some(LadBMSPrimitiveKind::Bool),
-        i: isize => return Some(LadBMSPrimitiveKind::Isize),
-        i: i8 => return Some(LadBMSPrimitiveKind::I8),
-        i: i16 => return Some(LadBMSPrimitiveKind::I16),
-        i: i32 => return Some(LadBMSPrimitiveKind::I32),
-        i: i64 => return Some(LadBMSPrimitiveKind::I64),
-        i: i128 => return Some(LadBMSPrimitiveKind::I128),
-        i: usize => return Some(LadBMSPrimitiveKind::Usize),
-        i: u8 => return Some(LadBMSPrimitiveKind::U8),
-        i: u16 => return Some(LadBMSPrimitiveKind::U16),
-        i: u32 => return Some(LadBMSPrimitiveKind::U32),
-        i: u64 => return Some(LadBMSPrimitiveKind::U64),
-        i: u128 => return Some(LadBMSPrimitiveKind::U128),
-        i: f32 => return Some(LadBMSPrimitiveKind::F32),
-        i: f64 => return Some(LadBMSPrimitiveKind::F64),
-        i: char => return Some(LadBMSPrimitiveKind::Char),
-        i: &'static str => return Some(LadBMSPrimitiveKind::Str),
-        i: str => return Some(LadBMSPrimitiveKind::Str),
-        i: String => return Some(LadBMSPrimitiveKind::String),
-        i: OsString => return Some(LadBMSPrimitiveKind::OsString),
-        i: PathBuf => return Some(LadBMSPrimitiveKind::PathBuf),
-        i: FunctionCallContext => return Some(LadBMSPrimitiveKind::FunctionCallContext),
-        i: DynamicScriptFunction => return Some(LadBMSPrimitiveKind::DynamicFunction),
-        i: DynamicScriptFunctionMut => return Some(LadBMSPrimitiveKind::DynamicFunctionMut),
-        i: ReflectReference => return Some(LadBMSPrimitiveKind::ReflectReference)
-    });
-    None
+fn primitive_from_type_id(type_id: TypeId) -> Option<ReflectionPrimitiveKind> {
+    Some(if type_id == TypeId::of::<bool>() {
+        ReflectionPrimitiveKind::Bool
+    } else if type_id == TypeId::of::<isize>() {
+        ReflectionPrimitiveKind::Isize
+    } else if type_id == TypeId::of::<i8>() {
+        ReflectionPrimitiveKind::I8
+    } else if type_id == TypeId::of::<i16>() {
+        ReflectionPrimitiveKind::I16
+    } else if type_id == TypeId::of::<i32>() {
+        ReflectionPrimitiveKind::I32
+    } else if type_id == TypeId::of::<i64>() {
+        ReflectionPrimitiveKind::I64
+    } else if type_id == TypeId::of::<i128>() {
+        ReflectionPrimitiveKind::I128
+    } else if type_id == TypeId::of::<usize>() {
+        ReflectionPrimitiveKind::Usize
+    } else if type_id == TypeId::of::<u8>() {
+        ReflectionPrimitiveKind::U8
+    } else if type_id == TypeId::of::<u16>() {
+        ReflectionPrimitiveKind::U16
+    } else if type_id == TypeId::of::<u32>() {
+        ReflectionPrimitiveKind::U32
+    } else if type_id == TypeId::of::<u64>() {
+        ReflectionPrimitiveKind::U64
+    } else if type_id == TypeId::of::<u128>() {
+        ReflectionPrimitiveKind::U128
+    } else if type_id == TypeId::of::<f32>() {
+        ReflectionPrimitiveKind::F32
+    } else if type_id == TypeId::of::<f64>() {
+        ReflectionPrimitiveKind::F64
+    } else if type_id == TypeId::of::<char>() {
+        ReflectionPrimitiveKind::Char
+    } else if type_id == TypeId::of::<&'static str>() {
+        ReflectionPrimitiveKind::Str
+    } else if type_id == TypeId::of::<String>() {
+        ReflectionPrimitiveKind::String
+    } else if type_id == TypeId::of::<OsString>() {
+        ReflectionPrimitiveKind::OsString
+    } else if type_id == TypeId::of::<PathBuf>() {
+        ReflectionPrimitiveKind::PathBuf
+    } else if type_id == TypeId::of::<FunctionCallContext>() {
+        ReflectionPrimitiveKind::FunctionCallContext
+    } else if type_id == TypeId::of::<DynamicScriptFunction>() {
+        ReflectionPrimitiveKind::DynamicFunction
+    } else if type_id == TypeId::of::<DynamicScriptFunctionMut>() {
+        ReflectionPrimitiveKind::DynamicFunctionMut
+    } else if type_id == TypeId::of::<ReflectReference>() {
+        ReflectionPrimitiveKind::ReflectReference
+    } else {
+        return None;
+    })
+}
+
+fn type_id_from_primitive(kind: &ReflectionPrimitiveKind) -> Option<TypeId> {
+    Some(match kind {
+        ReflectionPrimitiveKind::Bool => TypeId::of::<bool>(),
+        ReflectionPrimitiveKind::Isize => TypeId::of::<isize>(),
+        ReflectionPrimitiveKind::I8 => TypeId::of::<i8>(),
+        ReflectionPrimitiveKind::I16 => TypeId::of::<i16>(),
+        ReflectionPrimitiveKind::I32 => TypeId::of::<i32>(),
+        ReflectionPrimitiveKind::I64 => TypeId::of::<i64>(),
+        ReflectionPrimitiveKind::I128 => TypeId::of::<i128>(),
+        ReflectionPrimitiveKind::Usize => TypeId::of::<usize>(),
+        ReflectionPrimitiveKind::U8 => TypeId::of::<u8>(),
+        ReflectionPrimitiveKind::U16 => TypeId::of::<u16>(),
+        ReflectionPrimitiveKind::U32 => TypeId::of::<u32>(),
+        ReflectionPrimitiveKind::U64 => TypeId::of::<u64>(),
+        ReflectionPrimitiveKind::U128 => TypeId::of::<u128>(),
+        ReflectionPrimitiveKind::F32 => TypeId::of::<f32>(),
+        ReflectionPrimitiveKind::F64 => TypeId::of::<f64>(),
+        ReflectionPrimitiveKind::Char => TypeId::of::<char>(),
+        ReflectionPrimitiveKind::Str => TypeId::of::<&'static str>(),
+        ReflectionPrimitiveKind::String => TypeId::of::<String>(),
+        ReflectionPrimitiveKind::OsString => TypeId::of::<OsString>(),
+        ReflectionPrimitiveKind::PathBuf => TypeId::of::<PathBuf>(),
+        ReflectionPrimitiveKind::FunctionCallContext => TypeId::of::<FunctionCallContext>(),
+        ReflectionPrimitiveKind::DynamicFunction => TypeId::of::<DynamicScriptFunction>(),
+        ReflectionPrimitiveKind::DynamicFunctionMut => TypeId::of::<DynamicScriptFunctionMut>(),
+        ReflectionPrimitiveKind::ReflectReference => TypeId::of::<ReflectReference>(),
+        ReflectionPrimitiveKind::ScriptValue => TypeId::of::<ScriptValue>(),
+        ReflectionPrimitiveKind::External(_) => return None,
+    })
 }
 
 /// A builder for constructing LAD files.
@@ -90,33 +143,35 @@ impl<'t> LadFileBuilder<'t> {
 
     /// Create a new LAD file builder loaded with primitives.
     pub fn new(type_registry: &'t TypeRegistry) -> Self {
+        use ReflectionPrimitiveKind::*;
         let mut builder = Self::new_empty(type_registry);
 
         builder
-            .add_bms_primitive::<bool>("A boolean value")
-            .add_bms_primitive::<isize>("A signed pointer-sized integer")
-            .add_bms_primitive::<i8>("A signed 8-bit integer")
-            .add_bms_primitive::<i16>("A signed 16-bit integer")
-            .add_bms_primitive::<i32>("A signed 32-bit integer")
-            .add_bms_primitive::<i64>("A signed 64-bit integer")
-            .add_bms_primitive::<i128>("A signed 128-bit integer")
-            .add_bms_primitive::<usize>("An unsigned pointer-sized integer")
-            .add_bms_primitive::<u8>("An unsigned 8-bit integer")
-            .add_bms_primitive::<u16>("An unsigned 16-bit integer")
-            .add_bms_primitive::<u32>("An unsigned 32-bit integer")
-            .add_bms_primitive::<u64>("An unsigned 64-bit integer")
-            .add_bms_primitive::<u128>("An unsigned 128-bit integer")
-            .add_bms_primitive::<f32>("A 32-bit floating point number")
-            .add_bms_primitive::<f64>("A 64-bit floating point number")
-            .add_bms_primitive::<char>("An 8-bit character")
-            .add_bms_primitive::<&'static str>("A string slice")
-            .add_bms_primitive::<String>("A heap allocated string")
-            .add_bms_primitive::<OsString>("A heap allocated OS string")
-            .add_bms_primitive::<PathBuf>("A heap allocated file path")
-            .add_bms_primitive::<FunctionCallContext>("Function call context, if accepted by a function, means the function can access the world in arbitrary ways.")
-            .add_bms_primitive::<DynamicScriptFunction>("A callable dynamic function")
-            .add_bms_primitive::<DynamicScriptFunctionMut>("A stateful and callable dynamic function")
-            .add_bms_primitive::<ReflectReference>("A reference to a reflectable type");
+            .add_bms_primitive(Bool,"A boolean value")
+            .add_bms_primitive(Isize, "A signed pointer-sized integer")
+            .add_bms_primitive(I8, "A signed 8-bit integer")
+            .add_bms_primitive(I16, "A signed 16-bit integer")
+            .add_bms_primitive(I32, "A signed 32-bit integer")
+            .add_bms_primitive(I64, "A signed 64-bit integer")
+            .add_bms_primitive(I128, "A signed 128-bit integer")
+            .add_bms_primitive(Usize, "An unsigned pointer-sized integer")
+            .add_bms_primitive(U8, "An unsigned 8-bit integer")
+            .add_bms_primitive(U16, "An unsigned 16-bit integer")
+            .add_bms_primitive(U32, "An unsigned 32-bit integer")
+            .add_bms_primitive(U64, "An unsigned 64-bit integer")
+            .add_bms_primitive(U128, "An unsigned 128-bit integer")
+            .add_bms_primitive(F32, "A 32-bit floating point number")
+            .add_bms_primitive(F64, "A 64-bit floating point number")
+            .add_bms_primitive(Char, "An 8-bit character")
+            .add_bms_primitive(Str, "A string slice")
+            .add_bms_primitive(String, "A heap allocated string")
+            .add_bms_primitive(OsString, "A heap allocated OS string")
+            .add_bms_primitive(PathBuf, "A heap allocated file path")
+            .add_bms_primitive(FunctionCallContext, "Function call context, if accepted by a function, means the function can access the world in arbitrary ways.")
+            .add_bms_primitive(DynamicFunction, "A callable dynamic function")
+            .add_bms_primitive(DynamicFunctionMut, "A stateful and callable dynamic function")
+            .add_bms_primitive(ScriptValue, "A value representing the union of all representable values")
+            .add_bms_primitive(ReflectReference, "A reference to a reflectable type");
 
         builder
     }
@@ -136,20 +191,35 @@ impl<'t> LadFileBuilder<'t> {
 
     /// Add a BMS primitive to the LAD file.
     /// Will do nothing if the type is not a BMS primitive.
-    pub fn add_bms_primitive<T: 'static>(
+    pub fn add_bms_primitive(
         &mut self,
+        primitive: ReflectionPrimitiveKind,
         docs: impl Into<Cow<'static, str>>,
     ) -> &mut Self {
-        let type_id = self.lad_id_from_type_id(TypeId::of::<T>());
-        let kind = match primitive_from_type_id(TypeId::of::<T>()) {
-            Some(primitive) => primitive,
-            None => return self,
-        };
-        self.file.primitives.insert(
-            type_id,
-            LadBMSPrimitiveType {
-                kind,
-                documentation: docs.into(),
+        let type_ident = primitive.to_string();
+        let lad_type_id = LadTypeId::new_string_id(type_ident.clone().into());
+        if let Some(type_id) = type_id_from_primitive(&primitive) {
+            self.type_id_mapping.insert(type_id, lad_type_id.clone());
+        }
+        self.file.types.insert(
+            lad_type_id,
+            LadTypeDefinition {
+                identifier: type_ident.clone(),
+                crate_: None,
+                path: type_ident,
+                generics: vec![],
+                documentation: Some(docs.into().to_string()),
+                associated_functions: vec![],
+                layout: LadTypeLayout::Opaque,
+                generated: false,
+                insignificance: default_importance(),
+                metadata: LadTypeMetadata {
+                    is_component: false,
+                    is_resource: false,
+                    is_reflect: false,
+                    mapped_to_primitive_kind: Some(primitive),
+                    misc: Default::default(),
+                },
             },
         );
         self
@@ -221,7 +291,7 @@ impl<'t> LadFileBuilder<'t> {
         &mut self,
         key: impl Into<Cow<'static, str>>,
         is_static: bool,
-        type_kind: LadTypeKind,
+        type_kind: LadFieldOrVariableKind,
     ) -> &mut Self {
         self.file.globals.insert(
             key.into(),
@@ -249,7 +319,7 @@ impl<'t> LadFileBuilder<'t> {
         let lad_type_id = self.lad_id_from_type_id(std::any::TypeId::of::<T>());
         self.file.types.insert(
             lad_type_id,
-            LadType {
+            LadTypeDefinition {
                 identifier,
                 crate_: crate_.map(|s| s.to_owned()),
                 path,
@@ -259,6 +329,13 @@ impl<'t> LadFileBuilder<'t> {
                 layout: LadTypeLayout::Opaque,
                 generated: false,
                 insignificance: default_importance(),
+                metadata: LadTypeMetadata {
+                    is_component: false,
+                    is_resource: false,
+                    is_reflect: false,
+                    mapped_to_primitive_kind: primitive_from_type_id(std::any::TypeId::of::<T>()),
+                    misc: Default::default(),
+                },
             },
         );
         self
@@ -279,6 +356,9 @@ impl<'t> LadFileBuilder<'t> {
 
         let mut insignificance = default_importance();
         let mut generated = false;
+        let mut is_component = false;
+        let mut is_resource = false;
+        let is_reflect = true;
         if let Some(registration) = registration {
             if registration.contains::<MarkAsGenerated>() {
                 generated = true;
@@ -289,10 +369,16 @@ impl<'t> LadFileBuilder<'t> {
             if registration.contains::<MarkAsSignificant>() {
                 insignificance = default_importance() / 4;
             }
+            if registration.contains::<ReflectResource>() {
+                is_resource = true
+            }
+            if registration.contains::<ReflectComponent>() {
+                is_component = true
+            }
         }
 
         let type_id = self.lad_id_from_type_id(type_info.type_id());
-        let lad_type = LadType {
+        let lad_type = LadTypeDefinition {
             identifier: type_info
                 .type_path_table()
                 .ident()
@@ -316,6 +402,13 @@ impl<'t> LadFileBuilder<'t> {
             layout: self.lad_layout_from_type_info(type_info),
             generated,
             insignificance,
+            metadata: LadTypeMetadata {
+                is_component,
+                is_resource,
+                is_reflect,
+                mapped_to_primitive_kind: primitive_from_type_id(type_info.type_id()),
+                misc: Default::default(),
+            },
         };
         self.file.types.insert(type_id, lad_type);
         self
@@ -340,6 +433,9 @@ impl<'t> LadFileBuilder<'t> {
                     self.add_through_type_info(til);
                     self.add_through_type_info(tir);
                 }
+                TypedWrapperKind::HashSet(t) => {
+                    self.add_through_type_info(t);
+                }
                 TypedWrapperKind::Array(ti, _) => {
                     self.add_through_type_info(ti);
                 }
@@ -354,10 +450,12 @@ impl<'t> LadFileBuilder<'t> {
                         self.add_through_type_info(ti);
                     }
                 }
+                TypedWrapperKind::UntypedTuple => {}
             },
             ThroughTypeInfo::TypeInfo(type_info) => {
                 self.add_type_info(type_info);
             }
+            ThroughTypeInfo::Primitive(_) => {}
         }
 
         self
@@ -366,7 +464,7 @@ impl<'t> LadFileBuilder<'t> {
     /// Add a function definition to the LAD file.
     /// Will overwrite any existing function definitions with the same function id.
     ///
-    /// Parses argument and return specific docstrings as per: https://github.com/rust-lang/rust/issues/57525
+    /// Parses argument and return specific docstrings as per: <https://github.com/rust-lang/rust/issues/57525>
     ///
     /// i.e. looks for blocks like:
     /// ```rust,ignore
@@ -384,9 +482,22 @@ impl<'t> LadFileBuilder<'t> {
         let (main_docstring, arg_docstrings, return_docstring) =
             Self::split_docstring(function_info.docs.as_ref().unwrap_or(&default_docstring));
 
+        let mut identifier = function_info.name.as_ref();
+        let mut overload_index = None;
+        if identifier.contains("-") {
+            let mut parts = identifier.split("-");
+            if let Some(less_overload) = parts.next() {
+                identifier = less_overload;
+            }
+            if let Some(number) = parts.next() {
+                overload_index = number.parse::<usize>().ok()
+            }
+        }
+
         let function_id = self.lad_function_id_from_info(function_info);
         let lad_function = LadFunction {
-            identifier: function_info.name.clone(),
+            identifier: identifier.to_owned().into(),
+            overload_index,
             arguments: function_info
                 .arg_info
                 .clone()
@@ -394,7 +505,9 @@ impl<'t> LadFileBuilder<'t> {
                 .map(|arg| {
                     let kind = match &arg.type_info {
                         Some(through_type) => self.lad_type_kind_from_through_type(through_type),
-                        None => LadTypeKind::Unknown(self.lad_id_from_type_id(arg.type_id)),
+                        None => {
+                            LadFieldOrVariableKind::Unknown(self.lad_id_from_type_id(arg.type_id))
+                        }
                     };
                     LadArgument {
                         kind,
@@ -415,7 +528,7 @@ impl<'t> LadFileBuilder<'t> {
                     .clone()
                     .map(|info| self.lad_type_kind_from_through_type(&info))
                     .unwrap_or_else(|| {
-                        LadTypeKind::Unknown(
+                        LadFieldOrVariableKind::Unknown(
                             self.lad_id_from_type_id(function_info.return_info.type_id),
                         )
                     }),
@@ -426,6 +539,10 @@ impl<'t> LadFileBuilder<'t> {
                 Namespace::OnType(type_id) => {
                     LadFunctionNamespace::Type(self.lad_id_from_type_id(type_id))
                 }
+            },
+            metadata: LadFunctionMetadata {
+                is_operator: ScriptOperatorNames::parse(identifier).is_some(),
+                misc: Default::default(),
             },
         };
         self.file.functions.insert(function_id, lad_function);
@@ -534,7 +651,6 @@ impl<'t> LadFileBuilder<'t> {
             });
 
             file.functions.sort_keys();
-            file.primitives.sort_keys();
         }
 
         file
@@ -677,7 +793,7 @@ impl<'t> LadFileBuilder<'t> {
             fields: fields
                 .map(|field| LadNamedField {
                     name: field.name().to_string(),
-                    type_: self.lad_id_from_type_id(field.type_id()),
+                    type_: self.lad_type_kind_from_type_id(field.type_id()),
                 })
                 .collect(),
         }
@@ -692,7 +808,7 @@ impl<'t> LadFileBuilder<'t> {
             name,
             fields: fields
                 .map(|field| LadField {
-                    type_: self.lad_id_from_type_id(field.type_id()),
+                    type_: self.lad_type_kind_from_type_id(field.type_id()),
                 })
                 .collect(),
         }
@@ -748,6 +864,18 @@ impl<'t> LadFileBuilder<'t> {
         }
     }
 
+    /// Should only be used on fields, as those are never going to contain
+    /// untyped structures, i.e. are going to be fully reflectable
+    fn lad_type_kind_from_type_id(&mut self, type_id: TypeId) -> LadFieldOrVariableKind {
+        if let Some(type_info) = self.type_registry.get_type_info(type_id) {
+            let through_type_info = into_through_type_info(type_info);
+            self.lad_type_kind_from_through_type(&through_type_info)
+        } else {
+            LadFieldOrVariableKind::Unknown(self.lad_id_from_type_id(type_id))
+        }
+    }
+
+    /// Figures out whether the type is a primitive or not and creates the right type id
     fn lad_id_from_type_id(&mut self, type_id: TypeId) -> LadTypeId {
         // a special exception
         if type_id == std::any::TypeId::of::<World>() {
@@ -759,7 +887,7 @@ impl<'t> LadFileBuilder<'t> {
         }
 
         let new_id = match primitive_from_type_id(type_id) {
-            Some(primitive) => primitive.lad_type_id(),
+            Some(primitive) => LadTypeId::new_string_id(primitive.to_string().into()),
             None => {
                 if let Some(info) = self.type_registry.get_type_info(type_id) {
                     LadTypeId::new_string_id(info.type_path_table().path().into())
@@ -775,10 +903,8 @@ impl<'t> LadFileBuilder<'t> {
 
     fn lad_function_id_from_info(&mut self, function_info: &FunctionInfo) -> LadFunctionId {
         let namespace_string = match function_info.namespace {
-            bevy_mod_scripting_core::bindings::function::namespace::Namespace::Global => {
-                "".to_string()
-            }
-            bevy_mod_scripting_core::bindings::function::namespace::Namespace::OnType(type_id) => {
+            bevy_mod_scripting_bindings::function::namespace::Namespace::Global => "".to_string(),
+            bevy_mod_scripting_bindings::function::namespace::Namespace::OnType(type_id) => {
                 self.lad_id_from_type_id(type_id).to_string()
             }
         };
@@ -786,7 +912,10 @@ impl<'t> LadFileBuilder<'t> {
         LadFunctionId::new_string_id(format!("{}::{}", namespace_string, function_info.name))
     }
 
-    fn lad_type_kind_from_through_type(&mut self, through_type: &ThroughTypeInfo) -> LadTypeKind {
+    fn lad_type_kind_from_through_type(
+        &mut self,
+        through_type: &ThroughTypeInfo,
+    ) -> LadFieldOrVariableKind {
         match through_type {
             ThroughTypeInfo::UntypedWrapper {
                 through_type,
@@ -794,36 +923,41 @@ impl<'t> LadFileBuilder<'t> {
                 ..
             } => match wrapper_kind {
                 UntypedWrapperKind::Ref => {
-                    LadTypeKind::Ref(self.lad_id_from_type_id(through_type.type_id()))
+                    LadFieldOrVariableKind::Ref(self.lad_id_from_type_id(through_type.type_id()))
                 }
                 UntypedWrapperKind::Mut => {
-                    LadTypeKind::Mut(self.lad_id_from_type_id(through_type.type_id()))
+                    LadFieldOrVariableKind::Mut(self.lad_id_from_type_id(through_type.type_id()))
                 }
                 UntypedWrapperKind::Val => {
-                    LadTypeKind::Val(self.lad_id_from_type_id(through_type.type_id()))
+                    LadFieldOrVariableKind::Val(self.lad_id_from_type_id(through_type.type_id()))
                 }
             },
             ThroughTypeInfo::TypedWrapper(typed_wrapper_kind) => match typed_wrapper_kind {
-                TypedWrapperKind::Vec(through_type_info) => LadTypeKind::Vec(Box::new(
+                TypedWrapperKind::Vec(through_type_info) => LadFieldOrVariableKind::Vec(Box::new(
                     self.lad_type_kind_from_through_type(through_type_info),
                 )),
                 TypedWrapperKind::HashMap(through_type_info, through_type_info1) => {
-                    LadTypeKind::HashMap(
+                    LadFieldOrVariableKind::HashMap(
                         Box::new(self.lad_type_kind_from_through_type(through_type_info)),
                         Box::new(self.lad_type_kind_from_through_type(through_type_info1)),
                     )
                 }
-                TypedWrapperKind::Array(through_type_info, size) => LadTypeKind::Array(
+                TypedWrapperKind::HashSet(through_type_info) => LadFieldOrVariableKind::HashSet(
+                    Box::new(self.lad_type_kind_from_through_type(through_type_info)),
+                ),
+                TypedWrapperKind::Array(through_type_info, size) => LadFieldOrVariableKind::Array(
                     Box::new(self.lad_type_kind_from_through_type(through_type_info)),
                     *size,
                 ),
-                TypedWrapperKind::Option(through_type_info) => LadTypeKind::Option(Box::new(
-                    self.lad_type_kind_from_through_type(through_type_info),
-                )),
-                TypedWrapperKind::InteropResult(through_type_info) => LadTypeKind::InteropResult(
+                TypedWrapperKind::Option(through_type_info) => LadFieldOrVariableKind::Option(
                     Box::new(self.lad_type_kind_from_through_type(through_type_info)),
                 ),
-                TypedWrapperKind::Tuple(through_type_infos) => LadTypeKind::Tuple(
+                TypedWrapperKind::InteropResult(through_type_info) => {
+                    LadFieldOrVariableKind::InteropResult(Box::new(
+                        self.lad_type_kind_from_through_type(through_type_info),
+                    ))
+                }
+                TypedWrapperKind::Tuple(through_type_infos) => LadFieldOrVariableKind::Tuple(
                     through_type_infos
                         .iter()
                         .map(|through_type_info| {
@@ -831,7 +965,7 @@ impl<'t> LadFileBuilder<'t> {
                         })
                         .collect(),
                 ),
-                TypedWrapperKind::Union(through_type_infos) => LadTypeKind::Union(
+                TypedWrapperKind::Union(through_type_infos) => LadFieldOrVariableKind::Union(
                     through_type_infos
                         .iter()
                         .map(|through_type_info| {
@@ -839,12 +973,18 @@ impl<'t> LadFileBuilder<'t> {
                         })
                         .collect(),
                 ),
+                TypedWrapperKind::UntypedTuple => LadFieldOrVariableKind::UntypedTuple,
             },
             ThroughTypeInfo::TypeInfo(type_info) => {
                 match primitive_from_type_id(type_info.type_id()) {
-                    Some(primitive) => LadTypeKind::Primitive(primitive),
-                    None => LadTypeKind::Unknown(self.lad_id_from_type_id(type_info.type_id())),
+                    Some(primitive) => LadFieldOrVariableKind::Primitive(primitive),
+                    None => LadFieldOrVariableKind::Unknown(
+                        self.lad_id_from_type_id(type_info.type_id()),
+                    ),
                 }
+            }
+            ThroughTypeInfo::Primitive(reflection_primitive_kind) => {
+                LadFieldOrVariableKind::Primitive(reflection_primitive_kind.clone())
             }
         }
     }
@@ -854,15 +994,13 @@ impl<'t> LadFileBuilder<'t> {
 mod test {
     use std::collections::HashMap;
 
-    use bevy_mod_scripting_core::{
-        bindings::{
-            Union, Val,
-            function::{
-                from::Ref,
-                namespace::{GlobalNamespace, IntoNamespace},
-            },
-        },
+    use bevy_mod_scripting_bindings::{
+        Union, V,
         docgen::info::GetFunctionInfo,
+        function::{
+            from::R,
+            namespace::{GlobalNamespace, IntoNamespace},
+        },
     };
     use bevy_reflect::Reflect;
 
@@ -1063,23 +1201,32 @@ mod test {
         );
     }
 
-    /// Set to true to put output into test_assets.
-    const BLESS_TEST_FILE: bool = false;
-
     #[test]
     fn test_serializes_as_expected() {
         let mut type_registry = TypeRegistry::default();
 
         #[derive(Reflect)]
         /// I am a struct
-        struct StructType<T> {
+        struct GenericStructType<T> {
             /// hello from field
             field: usize,
             /// hello from field 2
             field2: T,
         }
 
-        impl TypedThrough for StructType<usize> {
+        impl TypedThrough for GenericStructType<usize> {
+            fn through_type_info() -> ThroughTypeInfo {
+                ThroughTypeInfo::TypeInfo(Self::type_info())
+            }
+        }
+
+        #[derive(Reflect)]
+        /// I am a simple plain struct type
+        struct PlainStructType {
+            int_field: usize,
+        }
+
+        impl TypedThrough for PlainStructType {
             fn through_type_info() -> ThroughTypeInfo {
                 ThroughTypeInfo::TypeInfo(Self::type_info())
             }
@@ -1112,20 +1259,31 @@ mod test {
             TupleStruct(usize, #[doc = "asd"] String),
         }
 
-        type_registry.register::<StructType<usize>>();
+        type_registry.register::<GenericStructType<usize>>();
         type_registry.register::<UnitType>();
         type_registry.register::<TupleStructType>();
         type_registry.register::<EnumType>();
+        type_registry.register::<PlainStructType>();
+
+        let plain_struct_function =
+            |_: R<PlainStructType>, _: usize| PlainStructType { int_field: 2 };
+        let plain_struct_function_info = plain_struct_function.get_function_info(
+            "plain_struct_function".into(),
+            PlainStructType::into_namespace(),
+        );
 
         let function = |_: ReflectReference, _: usize| 2usize;
         let function_info = function
-            .get_function_info("hello_world".into(), StructType::<usize>::into_namespace())
+            .get_function_info(
+                "hello_world".into(),
+                GenericStructType::<usize>::into_namespace(),
+            )
             .with_docs("hello docs");
 
         let function_with_complex_args =
-            |_: ReflectReference, _: (usize, String), _: Option<Vec<Ref<EnumType>>>| 2usize;
+            |_: ReflectReference, _: (usize, String), _: Option<Vec<R<EnumType>>>| 2usize;
         let function_with_complex_args_info = function_with_complex_args
-            .get_function_info("hello_world".into(), StructType::<usize>::into_namespace())
+            .get_function_info("hello_world".into(), GenericStructType::<usize>::into_namespace())
             .with_arg_names(&["ref_", "tuple", "option_vec_ref_wrapper"])
             .with_docs(
                 "Arguments: ".to_owned()
@@ -1149,15 +1307,17 @@ mod test {
         let mut lad_file = LadFileBuilder::new(&type_registry)
             .set_description("## Hello gentlemen\n I am  markdown file.\n - hello\n - world")
             .set_sorted(true)
+            .add_function_info(&plain_struct_function_info)
             .add_function_info(&function_info)
             .add_function_info(&global_function_info)
             .add_function_info(&function_with_complex_args_info)
-            .add_type::<StructType<usize>>()
+            .add_type::<GenericStructType<usize>>()
             .add_type::<UnitType>()
             .add_type::<TupleStructType>()
+            .add_type::<PlainStructType>()
             .add_type_info(EnumType::type_info())
-            .add_instance::<Val<StructType<usize>>>("my_static_instance", true)
-            .add_instance::<Vec<Val<UnitType>>>("my_non_static_instance", false)
+            .add_instance::<V<GenericStructType<usize>>>("my_static_instance", true)
+            .add_instance::<Vec<V<UnitType>>>("my_non_static_instance", false)
             .add_instance::<HashMap<String, Union<String, String>>>("map", false)
             .build();
 
@@ -1167,7 +1327,7 @@ mod test {
 
         normalize_file(&mut serialized);
 
-        if BLESS_TEST_FILE {
+        if std::env::var("BLESS_MODE").is_ok() {
             let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
             let path_to_test_assets = std::path::Path::new(&manifest_dir)
                 .join("..")
