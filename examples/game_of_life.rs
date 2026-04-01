@@ -3,24 +3,21 @@
 use std::time::Duration;
 
 use bevy::{
+    asset::RenderAssetUsages,
     diagnostic::LogDiagnosticsPlugin,
     image::ImageSampler,
     log::LogPlugin,
     prelude::*,
     reflect::Reflect,
-    render::{
-        render_asset::RenderAssetUsages,
-        render_resource::{Extent3d, TextureDimension, TextureFormat},
-    },
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
     window::{PrimaryWindow, WindowResized},
 };
 use bevy_console::{AddConsoleCommand, ConsoleCommand, ConsoleOpen, ConsolePlugin, make_layer};
-use bevy_mod_scripting::{core::bindings::AllocatorDiagnosticPlugin, prelude::*};
-use bevy_mod_scripting_core::{commands::RemoveStaticScript, script::StaticScripts};
+use bevy_mod_scripting::prelude::*;
+use bevy_mod_scripting_bindings::AllocatorDiagnosticPlugin;
 use clap::Parser;
 
 // CONSOLE SETUP
-
 fn console_app(app: &mut App) -> &mut App {
     // forward logs to the console
     app.add_plugins((
@@ -28,6 +25,7 @@ fn console_app(app: &mut App) -> &mut App {
             level: bevy::log::Level::INFO,
             filter: "error,game_of_life=info".to_owned(),
             custom_layer: make_layer,
+            ..Default::default()
         }),
         ConsolePlugin,
     ))
@@ -42,7 +40,7 @@ fn run_script_cmd(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     script_comps: Query<(Entity, &ScriptComponent)>,
-    static_scripts: Res<StaticScripts>,
+    mut static_scripts: Local<Vec<Handle<ScriptAsset>>>,
 ) {
     if let Some(Ok(command)) = log.take() {
         match command {
@@ -60,7 +58,16 @@ fn run_script_cmd(
                 } else {
                     bevy::log::info!("Using static script instead of spawning an entity");
                     let handle = asset_server.load(script_path);
-                    commands.queue(AddStaticScript::new(handle))
+                    static_scripts.push(handle.clone());
+                    if language == "lua" {
+                        commands.queue(AttachScript::<LuaScriptingPlugin>::new(
+                            ScriptAttachment::StaticScript(handle),
+                        ));
+                    } else {
+                        commands.queue(AttachScript::<RhaiScriptingPlugin>::new(
+                            ScriptAttachment::StaticScript(handle),
+                        ))
+                    }
                 }
             }
             GameOfLifeCommand::Stop => {
@@ -72,8 +79,13 @@ fn run_script_cmd(
                     commands.entity(id).despawn();
                 }
 
-                for script in static_scripts.values() {
-                    commands.queue(RemoveStaticScript::new(script.clone()));
+                for script in static_scripts.iter() {
+                    commands.queue(DetachScript::<LuaScriptingPlugin>::new(
+                        ScriptAttachment::StaticScript(script.clone()),
+                    ));
+                    commands.queue(DetachScript::<RhaiScriptingPlugin>::new(
+                        ScriptAttachment::StaticScript(script.clone()),
+                    ));
                 }
             }
         }
@@ -101,7 +113,6 @@ pub enum GameOfLifeCommand {
 // ------------- GAME OF LIFE
 fn game_of_life_app(app: &mut App) -> &mut App {
     app.insert_resource(Time::<Fixed>::from_seconds(UPDATE_FREQUENCY.into()))
-        // .add_plugins(BMSPlugin.set(LuaScriptingPlugin::default().enable_context_sharing()))
         .add_plugins(BMSPlugin)
         .register_type::<LifeState>()
         .register_type::<Settings>()
@@ -115,10 +126,8 @@ fn game_of_life_app(app: &mut App) -> &mut App {
                 send_on_update.after(update_rendered_state),
                 (
                     event_handler::<OnUpdate, LuaScriptingPlugin>,
-                    #[cfg(feature = "rhai")]
                     event_handler::<OnUpdate, RhaiScriptingPlugin>,
                     event_handler::<OnClick, LuaScriptingPlugin>,
-                    #[cfg(feature = "rhai")]
                     event_handler::<OnClick, RhaiScriptingPlugin>,
                 )
                     .after(send_on_update),
@@ -158,13 +167,11 @@ impl Default for Settings {
 pub fn register_script_functions(app: &mut App) -> &mut App {
     let world = app.world_mut();
     NamespaceBuilder::<GlobalNamespace>::new_unregistered(world)
-        .register("info", |s: String| {
-            bevy::log::info!(s);
-        })
         .register("rand", rand::random::<f32>);
     app
 }
 
+// drawing based on https://github.com/bevyengine/bevy/blob/main/examples/2d/cpu_draw.rs
 pub fn init_game_of_life_state(
     mut commands: Commands,
     mut assets: ResMut<Assets<Image>>,
@@ -183,18 +190,11 @@ pub fn init_game_of_life_state(
     );
 
     image.sampler = ImageSampler::nearest();
+    let handle = assets.add(image);
 
     commands.spawn(Camera2d);
     commands
-        .spawn(Sprite {
-            image: assets.add(image),
-            custom_size: Some(Vec2::new(
-                settings.display_grid_dimensions.0 as f32,
-                settings.display_grid_dimensions.1 as f32,
-            )),
-            color: Color::srgb(1.0, 0.388, 0.278), // TOMATO
-            ..Default::default()
-        })
+        .spawn(Sprite::from_image(handle))
         .insert(LifeState {
             cells: vec![
                 0u8;
@@ -208,7 +208,7 @@ pub fn init_game_of_life_state(
 }
 
 pub fn sync_window_size(
-    mut resize_event: EventReader<WindowResized>,
+    mut resize_event: MessageReader<WindowResized>,
     mut settings: ResMut<Settings>,
     mut query: Query<&mut Sprite, With<LifeState>>,
     primary_windows: Query<&Window, With<PrimaryWindow>>,
@@ -264,21 +264,21 @@ callback_labels!(
 );
 
 /// Sends events allowing scripts to drive update logic
-pub fn send_on_update(mut events: EventWriter<ScriptCallbackEvent>) {
-    events.send(ScriptCallbackEvent::new_for_all_scripts(OnUpdate, vec![]));
+pub fn send_on_update(mut events: MessageWriter<ScriptCallbackEvent>) {
+    events.write(ScriptCallbackEvent::new_for_all_scripts(OnUpdate, vec![]));
 }
 
 pub fn send_on_click(
     buttons: Res<ButtonInput<MouseButton>>,
     q_windows: Query<&Window, With<PrimaryWindow>>,
-    mut events: EventWriter<ScriptCallbackEvent>,
+    mut events: MessageWriter<ScriptCallbackEvent>,
 ) {
     if buttons.just_pressed(MouseButton::Left) {
         let window = q_windows.single();
         let pos = window.unwrap().cursor_position().unwrap_or_default();
         let x = pos.x as u32;
         let y = pos.y as u32;
-        events.send(ScriptCallbackEvent::new_for_all_scripts(
+        events.write(ScriptCallbackEvent::new_for_all_scripts(
             OnClick,
             vec![
                 ScriptValue::Integer(x as i64),

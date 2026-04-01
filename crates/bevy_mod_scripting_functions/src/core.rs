@@ -1,40 +1,31 @@
 //! Contains functions defined by the [`bevy_mod_scripting_core`] crate
 
+use bevy_mod_scripting_asset::ScriptAsset;
+use bevy_mod_scripting_script::ScriptAttachment;
 use bevy_platform::collections::HashMap;
-use std::ops::Deref;
+use std::{collections::VecDeque, ops::Deref};
 
 use bevy_app::App;
 use bevy_asset::{AssetServer, Handle};
 use bevy_ecs::{entity::Entity, prelude::AppTypeRegistry, schedule::Schedules, world::World};
-use bevy_mod_scripting_core::{
-    asset::ScriptAsset,
-    bindings::{
-        function::{
-            from::Union, namespace::GlobalNamespace, script_function::DynamicScriptFunctionMut,
-        },
-        script_system::ScriptSystemBuilder,
-    },
-    docgen::info::FunctionInfo,
-    script::ScriptAttachment,
-    *,
-};
-use bevy_mod_scripting_derive::script_bindings;
-use bevy_reflect::PartialReflect;
-use bevy_system_reflection::{ReflectSchedule, ReflectSystem};
-use bindings::{
-    ReflectReference, ScriptComponentRegistration, ScriptQueryBuilder, ScriptQueryResult,
-    ScriptResourceRegistration, ScriptTypeRegistration, ThreadWorldContainer, WorldContainer,
+use bevy_mod_scripting_bindings::{
+    DynamicScriptFunction, DynamicScriptFunctionMut, FunctionInfo, GlobalNamespace, InteropError,
+    PartialReflectExt, ReflectReference, ScriptComponentRegistration, ScriptQueryBuilder,
+    ScriptQueryResult, ScriptResourceRegistration, ScriptTypeRegistration, ThreadWorldContainer,
+    Union, VariadicTuple,
     function::{
-        from::{Ref, Val},
+        from::{R, V},
         from_ref::FromScriptRef,
         into_ref::IntoScriptRef,
         script_function::{FunctionCallContext, ScriptFunctionMut},
     },
-    pretty_print::DisplayWithWorld,
     script_value::ScriptValue,
 };
-use error::InteropError;
-use reflection_extensions::{PartialReflectExt, TypeIdExtensions};
+use bevy_mod_scripting_core::script_system::{ManageScriptSystems, ScriptSystemBuilder};
+use bevy_mod_scripting_derive::script_bindings;
+use bevy_mod_scripting_display::{OrFakeId, WithTypeInfo};
+use bevy_reflect::PartialReflect;
+use bevy_system_reflection::{ReflectSchedule, ReflectSystem};
 
 #[allow(unused_variables, reason = "feature flags")]
 pub fn register_bevy_bindings(app: &mut App) {
@@ -44,6 +35,8 @@ pub fn register_bevy_bindings(app: &mut App) {
     app.add_plugins(bevy_animation_bms_bindings::BevyAnimationScriptingPlugin);
     #[cfg(feature = "bevy_asset")]
     app.add_plugins(bevy_asset_bms_bindings::BevyAssetScriptingPlugin);
+    #[cfg(feature = "bevy_camera")]
+    app.add_plugins(bevy_camera_bms_bindings::BevyCameraScriptingPlugin);
     #[cfg(feature = "bevy_color")]
     app.add_plugins(bevy_color_bms_bindings::BevyColorScriptingPlugin);
     #[cfg(feature = "bevy_core_pipeline")]
@@ -60,6 +53,8 @@ pub fn register_bevy_bindings(app: &mut App) {
     app.add_plugins(bevy_input_bms_bindings::BevyInputScriptingPlugin);
     #[cfg(feature = "bevy_input_focus")]
     app.add_plugins(bevy_input_focus_bms_bindings::BevyInputFocusScriptingPlugin);
+    #[cfg(feature = "bevy_light")]
+    app.add_plugins(bevy_light_bms_bindings::BevyLightScriptingPlugin);
     #[cfg(feature = "bevy_math")]
     app.add_plugins(bevy_math_bms_bindings::BevyMathScriptingPlugin);
     #[cfg(feature = "bevy_mesh")]
@@ -68,6 +63,8 @@ pub fn register_bevy_bindings(app: &mut App) {
     app.add_plugins(bevy_pbr_bms_bindings::BevyPbrScriptingPlugin);
     #[cfg(feature = "bevy_picking")]
     app.add_plugins(bevy_picking_bms_bindings::BevyPickingScriptingPlugin);
+    #[cfg(feature = "bevy_post_process")]
+    app.add_plugins(bevy_post_process_bms_bindings::BevyPostProcessScriptingPlugin);
     #[cfg(feature = "bevy_reflect")]
     app.add_plugins(bevy_reflect_bms_bindings::BevyReflectScriptingPlugin);
     #[cfg(feature = "bevy_render")]
@@ -76,17 +73,23 @@ pub fn register_bevy_bindings(app: &mut App) {
     app.add_plugins(bevy_scene_bms_bindings::BevySceneScriptingPlugin);
     #[cfg(feature = "bevy_sprite")]
     app.add_plugins(bevy_sprite_bms_bindings::BevySpriteScriptingPlugin);
+    #[cfg(feature = "bevy_sprite_render")]
+    app.add_plugins(bevy_sprite_renderer_bms_bindings::BevySpriteRendererScriptingPlugin);
     #[cfg(feature = "bevy_text")]
     app.add_plugins(bevy_text_bms_bindings::BevyTextScriptingPlugin);
     #[cfg(feature = "bevy_time")]
     app.add_plugins(bevy_time_bms_bindings::BevyTimeScriptingPlugin);
     #[cfg(feature = "bevy_transform")]
     app.add_plugins(bevy_transform_bms_bindings::BevyTransformScriptingPlugin);
+    #[cfg(feature = "bevy_ui")]
+    app.add_plugins(bevy_ui_bms_bindings::BevyUiScriptingPlugin);
+    #[cfg(feature = "bevy_ui_render")]
+    app.add_plugins(bevy_ui_renderer_bms_bindings::BevyUiRendererScriptingPlugin);
 }
 
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "world_functions",
     unregistered
 )]
@@ -105,8 +108,8 @@ impl World {
     ) -> Result<
         Option<
             Union<
-                Val<ScriptTypeRegistration>,
-                Union<Val<ScriptComponentRegistration>, Val<ScriptResourceRegistration>>,
+                V<ScriptTypeRegistration>,
+                Union<V<ScriptComponentRegistration>, V<ScriptResourceRegistration>>,
             >,
         >,
         InteropError,
@@ -115,7 +118,7 @@ impl World {
         let world = ctxt.world()?;
         world
             .get_type_registration_by_name(type_name)
-            .map(|v| v.map(|v| v.map_both(Val::from, |u| u.map_both(Val::from, Val::from))))
+            .map(|v| v.map(|v| v.map_both(V::from, |u| u.map_both(V::from, V::from))))
     }
 
     /// Retrieves the schedule with the given name, Also ensures the schedule is initialized before returning it.
@@ -135,7 +138,7 @@ impl World {
     fn get_schedule_by_name(
         ctxt: FunctionCallContext,
         name: String,
-    ) -> Result<Option<Val<ReflectSchedule>>, InteropError> {
+    ) -> Result<Option<V<ReflectSchedule>>, InteropError> {
         profiling::function_scope!("get_schedule_by_name");
         let world = ctxt.world()?;
         let schedule = match world.get_schedule_by_name(name) {
@@ -144,7 +147,9 @@ impl World {
         };
 
         // do two things, check it actually exists
-        world.scope_schedule(&schedule, |world, schedule| schedule.initialize(world))??;
+        world
+            .scope_schedule(&schedule, |world, schedule| schedule.initialize(world))?
+            .map_err(InteropError::external)?;
 
         Ok(Some(schedule.into()))
     }
@@ -159,8 +164,8 @@ impl World {
     /// * `component`: The component on the entity, if it exists.
     fn get_component(
         ctxt: FunctionCallContext,
-        entity: Val<Entity>,
-        registration: Val<ScriptComponentRegistration>,
+        entity: V<Entity>,
+        registration: V<ScriptComponentRegistration>,
     ) -> Result<Option<ReflectReference>, InteropError> {
         profiling::function_scope!("get_component");
         let world = ctxt.world()?;
@@ -178,8 +183,8 @@ impl World {
     /// * `has_component`: Whether the entity has the component.
     fn has_component(
         ctxt: FunctionCallContext,
-        entity: Val<Entity>,
-        registration: Val<ScriptComponentRegistration>,
+        entity: V<Entity>,
+        registration: V<ScriptComponentRegistration>,
     ) -> Result<bool, InteropError> {
         profiling::function_scope!("has_component");
         let world = ctxt.world()?;
@@ -195,8 +200,8 @@ impl World {
     /// * `result`: Nothing if the component was removed successfully or didn't exist in the first place.
     fn remove_component(
         ctxt: FunctionCallContext,
-        entity: Val<Entity>,
-        registration: Val<ScriptComponentRegistration>,
+        entity: V<Entity>,
+        registration: V<ScriptComponentRegistration>,
     ) -> Result<(), InteropError> {
         profiling::function_scope!("remove_component");
         let world = ctxt.world()?;
@@ -211,7 +216,7 @@ impl World {
     /// * `resource`: The resource, if it exists.
     fn get_resource(
         ctxt: FunctionCallContext,
-        registration: Val<ScriptResourceRegistration>,
+        registration: V<ScriptResourceRegistration>,
     ) -> Result<Option<ReflectReference>, InteropError> {
         profiling::function_scope!("get_resource");
         let world = ctxt.world()?;
@@ -228,7 +233,7 @@ impl World {
     /// * `has_resource`: Whether the world has the resource.
     fn has_resource(
         ctxt: FunctionCallContext,
-        registration: Val<ScriptResourceRegistration>,
+        registration: V<ScriptResourceRegistration>,
     ) -> Result<bool, InteropError> {
         profiling::function_scope!("has_resource");
         let world = ctxt.world()?;
@@ -243,7 +248,7 @@ impl World {
     /// * `result`: Nothing if the resource was removed successfully or didn't exist in the first place.
     fn remove_resource(
         ctxt: FunctionCallContext,
-        registration: Val<ScriptResourceRegistration>,
+        registration: V<ScriptResourceRegistration>,
     ) -> Result<(), InteropError> {
         profiling::function_scope!("remove_resource");
         let world = ctxt.world()?;
@@ -258,8 +263,8 @@ impl World {
     /// * `result`: Nothing if the resource was added successfully.
     fn add_default_component(
         ctxt: FunctionCallContext,
-        entity: Val<Entity>,
-        registration: Val<ScriptComponentRegistration>,
+        entity: V<Entity>,
+        registration: V<ScriptComponentRegistration>,
     ) -> Result<(), InteropError> {
         profiling::function_scope!("add_default_component");
         let world = ctxt.world()?;
@@ -272,10 +277,10 @@ impl World {
     /// * `ctxt`: The function call context.
     /// Returns:
     /// * `entity`: The newly spawned entity
-    fn spawn(ctxt: FunctionCallContext) -> Result<Val<Entity>, InteropError> {
+    fn spawn(ctxt: FunctionCallContext) -> Result<V<Entity>, InteropError> {
         profiling::function_scope!("spawn");
         let world = ctxt.world()?;
-        Ok(Val(world.spawn()?))
+        Ok(V(world.spawn()?))
     }
 
     /// Inserts the given component value into the provided entity
@@ -289,8 +294,8 @@ impl World {
     /// * `result`: Nothing if the component was inserted successfully.
     fn insert_component(
         ctxt: FunctionCallContext,
-        entity: Val<Entity>,
-        registration: Val<ScriptComponentRegistration>,
+        entity: V<Entity>,
+        registration: V<ScriptComponentRegistration>,
         value: ReflectReference,
     ) -> Result<(), InteropError> {
         profiling::function_scope!("insert_component");
@@ -309,9 +314,9 @@ impl World {
     /// * `result`: Nothing if the children were inserted successfully.
     fn insert_children(
         ctxt: FunctionCallContext,
-        entity: Val<Entity>,
+        entity: V<Entity>,
         index: usize,
-        children: Vec<Val<Entity>>,
+        children: Vec<V<Entity>>,
     ) -> Result<(), InteropError> {
         profiling::function_scope!("insert_children");
         let world = ctxt.world()?;
@@ -336,8 +341,8 @@ impl World {
     /// * `result`: Nothing if the children were pushed successfully.
     fn push_children(
         ctxt: FunctionCallContext,
-        entity: Val<Entity>,
-        children: Vec<Val<Entity>>,
+        entity: V<Entity>,
+        children: Vec<V<Entity>>,
     ) -> Result<(), InteropError> {
         profiling::function_scope!("push_children");
         let world = ctxt.world()?;
@@ -355,12 +360,12 @@ impl World {
     /// * `children`: The children of the entity.
     fn get_children(
         ctxt: FunctionCallContext,
-        entity: Val<Entity>,
-    ) -> Result<Vec<Val<Entity>>, InteropError> {
+        entity: V<Entity>,
+    ) -> Result<Vec<V<Entity>>, InteropError> {
         profiling::function_scope!("get_children");
         let world = ctxt.world()?;
         let children = world.get_children(*entity)?;
-        Ok(children.into_iter().map(Val).collect::<Vec<_>>())
+        Ok(children.into_iter().map(V).collect::<Vec<_>>())
     }
 
     /// Retrieves the parent of the given entity.
@@ -371,19 +376,19 @@ impl World {
     /// * `parent`: The parent of the entity
     fn get_parent(
         ctxt: FunctionCallContext,
-        entity: Val<Entity>,
-    ) -> Result<Option<Val<Entity>>, InteropError> {
+        entity: V<Entity>,
+    ) -> Result<Option<V<Entity>>, InteropError> {
         profiling::function_scope!("get_parent");
         let world = ctxt.world()?;
         let parent = world.get_parent(*entity)?;
-        Ok(parent.map(Val))
+        Ok(parent.map(V))
     }
 
     /// Despawns the given entity.
     /// Arguments:
     /// * `ctxt`: The function call context.
     /// * `entity`: The entity to despawn.
-    fn despawn(ctxt: FunctionCallContext, entity: Val<Entity>) -> Result<(), InteropError> {
+    fn despawn(ctxt: FunctionCallContext, entity: V<Entity>) -> Result<(), InteropError> {
         profiling::function_scope!("despawn");
         let world = ctxt.world()?;
         world.despawn(*entity)
@@ -397,7 +402,7 @@ impl World {
     /// * `result`: Nothing if the descendants were despawned successfully.
     fn despawn_descendants(
         ctxt: FunctionCallContext,
-        entity: Val<Entity>,
+        entity: V<Entity>,
     ) -> Result<(), InteropError> {
         profiling::function_scope!("despawn_descendants");
         let world = ctxt.world()?;
@@ -411,10 +416,7 @@ impl World {
     /// * `entity`: The entity to despawn recursively.
     /// Returns:
     /// * `result`: Nothing if the entity and its descendants were despawned successfully.
-    fn despawn_recursive(
-        ctxt: FunctionCallContext,
-        entity: Val<Entity>,
-    ) -> Result<(), InteropError> {
+    fn despawn_recursive(ctxt: FunctionCallContext, entity: V<Entity>) -> Result<(), InteropError> {
         profiling::function_scope!("despawn_recursive");
         let world = ctxt.world()?;
         world.despawn_recursive(*entity)
@@ -426,7 +428,7 @@ impl World {
     /// * `entity`: The entity to check.
     /// Returns:
     /// * `has_entity`: Whether the entity exists.
-    fn has_entity(ctxt: FunctionCallContext, e: Val<Entity>) -> Result<bool, InteropError> {
+    fn has_entity(ctxt: FunctionCallContext, e: V<Entity>) -> Result<bool, InteropError> {
         profiling::function_scope!("has_entity");
         let world = ctxt.world()?;
         world.has_entity(*e)
@@ -436,10 +438,10 @@ impl World {
     ///
     /// Returns:
     /// * `query`: The new query builder.
-    fn query() -> Result<Val<ScriptQueryBuilder>, InteropError> {
+    fn query() -> Result<V<ScriptQueryBuilder>, InteropError> {
         profiling::function_scope!("query");
         let query_builder = ScriptQueryBuilder::default();
-        Ok(Val(query_builder))
+        Ok(V(query_builder))
     }
 
     /// Adds the given system to the world.
@@ -451,24 +453,25 @@ impl World {
     /// * `system`: The system that was added.
     fn add_system(
         ctxt: FunctionCallContext,
-        #[allow(unused_variables)] schedule: Val<ReflectSchedule>,
-        #[allow(unused_variables)] builder: Val<ScriptSystemBuilder>,
-    ) -> Result<Val<ReflectSystem>, InteropError> {
+        #[allow(unused_variables)] schedule: V<ReflectSchedule>,
+        #[allow(unused_variables)] builder: V<ScriptSystemBuilder>,
+    ) -> Result<V<ReflectSystem>, InteropError> {
         profiling::function_scope!("add_system");
         let _world = ctxt.world()?;
         let _system = match ctxt.language() {
             #[cfg(feature = "lua_bindings")]
-            asset::Language::Lua => _world
+            bevy_mod_scripting_asset::Language::Lua => _world
                 .add_system::<bevy_mod_scripting_lua::LuaScriptingPlugin>(
-                    &schedule,
-                    builder.into_inner(),
-                )?,
+                &schedule,
+                builder.into_inner(),
+            )?,
             #[cfg(feature = "rhai_bindings")]
-            asset::Language::Rhai => _world
-                .add_system::<bevy_mod_scripting_rhai::RhaiScriptingPlugin>(
+            bevy_mod_scripting_asset::Language::Rhai => {
+                _world.add_system::<bevy_mod_scripting_rhai::RhaiScriptingPlugin>(
                     &schedule,
                     builder.into_inner(),
-                )?,
+                )?
+            }
             _ => {
                 return Err(InteropError::unsupported_operation(
                     None,
@@ -481,7 +484,7 @@ impl World {
             }
         };
         #[allow(unreachable_code)]
-        Ok(Val(_system))
+        Ok(V(_system))
     }
 
     /// Quits the program.
@@ -511,16 +514,49 @@ impl World {
     fn register_new_component(
         ctxt: FunctionCallContext,
         name: String,
-    ) -> Result<Val<ScriptComponentRegistration>, InteropError> {
+    ) -> Result<V<ScriptComponentRegistration>, InteropError> {
         profiling::function_scope!("register_new_component");
         let world = ctxt.world()?;
-        world.register_script_component(name).map(Val)
+        world.register_script_component(name).map(V)
+    }
+
+    /// Retrieves an asset by its handle and asset type registration.
+    ///
+    /// Arguments:
+    /// * `ctxt`: The function call context.
+    /// * `handle_reference`: The handle to the asset (as a reflect reference).
+    /// * `registration`: The type registration of the asset type.
+    /// Returns:
+    /// * `asset`: The asset reference, if the asset is loaded.
+    fn get_asset(
+        ctxt: FunctionCallContext,
+        handle_reference: ReflectReference,
+        registration: V<ScriptTypeRegistration>,
+    ) -> Result<Option<ReflectReference>, InteropError> {
+        profiling::function_scope!("get_asset");
+        let untyped_handle = handle_reference.try_untyped_asset_handle(ctxt.world()?)?;
+        Ok(Some(ReflectReference::new_asset_ref(
+            untyped_handle,
+            registration.type_id(),
+            ctxt.world()?,
+        )?))
+    }
+
+    /// Checks if can get asset handle
+    fn has_asset(
+        ctxt: FunctionCallContext,
+        handle_reference: ReflectReference,
+    ) -> Result<bool, InteropError> {
+        profiling::function_scope!("has_asset");
+        Ok(handle_reference
+            .try_untyped_asset_handle(ctxt.world()?)
+            .is_ok())
     }
 }
 
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "reflect_reference_functions",
     core
 )]
@@ -541,7 +577,7 @@ impl ReflectReference {
         reference.variant_name(world)
     }
 
-    /// Displays this reference without printing the exact contents.
+    /// Displays this reference and its contents if possible.
     ///
     /// This is useful for debugging and logging.
     ///
@@ -550,16 +586,15 @@ impl ReflectReference {
     /// * `reference`: The reference to display.
     /// Returns:
     /// * `display`: The display string.
-    fn display_ref(
-        ctxt: FunctionCallContext,
+    fn display(
+        _ctxt: FunctionCallContext,
         reference: ReflectReference,
     ) -> Result<String, InteropError> {
-        profiling::function_scope!("display_ref");
-        let world = ctxt.world()?;
-        Ok(reference.display_with_world(world))
+        profiling::function_scope!("display");
+        Ok(format!("{}", WithTypeInfo::new(&reference)))
     }
 
-    /// Displays the "value" of this reference
+    /// Displays a debug representation of this reference.
     ///
     /// This is useful for debugging and logging.
     ///
@@ -568,13 +603,12 @@ impl ReflectReference {
     /// * `reference`: The reference to display.
     /// Returns:
     /// * `display`: The display string.
-    fn display_value(
-        ctxt: FunctionCallContext,
+    fn debug(
+        _ctxt: FunctionCallContext,
         reference: ReflectReference,
     ) -> Result<String, InteropError> {
-        profiling::function_scope!("display_value");
-        let world = ctxt.world()?;
-        Ok(reference.display_value_with_world(world))
+        profiling::function_scope!("debug");
+        Ok(format!("{reference:#?}"))
     }
 
     /// Gets and clones the value under the specified key if the underlying type is a map type.
@@ -805,7 +839,7 @@ impl ReflectReference {
         let iter_function = move || {
             // world is not thread safe, we can't capture it in the closure
             // or it will also be non-thread safe
-            let world = ThreadWorldContainer.try_get_world()?;
+            let world = ThreadWorldContainer.try_get_context()?.world;
             if len == 0 {
                 return Ok(ScriptValue::Unit);
             }
@@ -813,7 +847,6 @@ impl ReflectReference {
             let (next_ref, _) = infinite_iter.next_ref();
 
             let converted = ReflectReference::into_script_ref(next_ref, world);
-            // println!("idx: {idx:?}, converted: {converted:?}");
             len -= 1;
             // we stop once the reflection path is invalid
             converted
@@ -832,14 +865,14 @@ impl ReflectReference {
     fn functions(
         ctxt: FunctionCallContext,
         reference: ReflectReference,
-    ) -> Result<Vec<Val<FunctionInfo>>, InteropError> {
+    ) -> Result<Vec<V<FunctionInfo>>, InteropError> {
         profiling::function_scope!("functions");
         let world = ctxt.world()?;
         let type_id = reference.tail_type_id(world.clone())?.or_fake_id();
         let functions = world
             .get_functions_on_type(type_id)
             .into_iter()
-            .map(|(_, v)| Val::new(v.info.deref().clone()))
+            .map(|(_, v)| V::new(v.info.deref().clone()))
             .collect::<Vec<_>>();
         // convert to info
         Ok(functions)
@@ -848,7 +881,7 @@ impl ReflectReference {
 
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "script_type_registration_functions",
     core
 )]
@@ -859,7 +892,7 @@ impl ScriptTypeRegistration {
     /// * `registration`: The type registration.
     /// Returns:
     /// * `type_name`: The name of the type.
-    fn type_name(registration: Ref<ScriptTypeRegistration>) -> String {
+    fn type_name(registration: R<ScriptTypeRegistration>) -> String {
         profiling::function_scope!("type_name");
         registration.type_name().to_string()
     }
@@ -870,7 +903,7 @@ impl ScriptTypeRegistration {
     /// * `registration`: The type registration.
     /// Returns:
     /// * `short_name`: The short name of the
-    fn short_name(registration: Ref<ScriptTypeRegistration>) -> String {
+    fn short_name(registration: R<ScriptTypeRegistration>) -> String {
         profiling::function_scope!("short_name");
         registration.short_name().to_string()
     }
@@ -878,7 +911,7 @@ impl ScriptTypeRegistration {
 
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "script_component_registration_functions",
     core
 )]
@@ -889,7 +922,7 @@ impl ScriptComponentRegistration {
     /// * `registration`: The type registration.
     /// Returns:
     /// * `type_name`: The name of the type.
-    fn type_name(registration: Ref<ScriptComponentRegistration>) -> &'static str {
+    fn type_name(registration: R<ScriptComponentRegistration>) -> &'static str {
         profiling::function_scope!("type_name");
         registration.type_registration().type_name()
     }
@@ -900,7 +933,7 @@ impl ScriptComponentRegistration {
     /// * `registration`: The type registration.
     /// Returns:
     /// * `short_name`: The short name of the
-    fn short_name(registration: Ref<ScriptComponentRegistration>) -> &'static str {
+    fn short_name(registration: R<ScriptComponentRegistration>) -> &'static str {
         profiling::function_scope!("short_name");
         registration.type_registration().short_name()
     }
@@ -908,7 +941,7 @@ impl ScriptComponentRegistration {
 
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "script_resource_registration_functions",
     core
 )]
@@ -919,7 +952,7 @@ impl ScriptResourceRegistration {
     /// * `registration`: The type registration.
     /// Returns:
     /// * `type_name`: The name of the type.
-    fn type_name(registration: Ref<ScriptResourceRegistration>) -> &'static str {
+    fn type_name(registration: R<ScriptResourceRegistration>) -> &'static str {
         profiling::function_scope!("type_name");
         registration.type_registration().type_name()
     }
@@ -930,7 +963,7 @@ impl ScriptResourceRegistration {
     /// * `registration`: The type registration.
     /// Returns:
     /// * `short_name`: The short name of the
-    fn short_name(registration: Ref<ScriptResourceRegistration>) -> &'static str {
+    fn short_name(registration: R<ScriptResourceRegistration>) -> &'static str {
         profiling::function_scope!("short_name");
         registration.type_registration().short_name()
     }
@@ -938,7 +971,7 @@ impl ScriptResourceRegistration {
 
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "script_query_builder_functions",
     core
 )]
@@ -951,13 +984,13 @@ impl ScriptQueryBuilder {
     /// Returns:
     /// * `query`: The query with the component added
     fn component(
-        query: Val<ScriptQueryBuilder>,
-        components: Val<ScriptComponentRegistration>,
-    ) -> Val<ScriptQueryBuilder> {
+        query: V<ScriptQueryBuilder>,
+        components: V<ScriptComponentRegistration>,
+    ) -> V<ScriptQueryBuilder> {
         profiling::function_scope!("component");
         let mut builder = query.into_inner();
         builder.component(components.into_inner());
-        Val(builder)
+        V(builder)
     }
 
     /// Adds a component to filter the query by. This component will NOT be retrieved.
@@ -968,13 +1001,13 @@ impl ScriptQueryBuilder {
     /// Returns:
     /// * `query`: The query with the component added
     fn with(
-        query: Val<ScriptQueryBuilder>,
-        with: Val<ScriptComponentRegistration>,
-    ) -> Val<ScriptQueryBuilder> {
+        query: V<ScriptQueryBuilder>,
+        with: V<ScriptComponentRegistration>,
+    ) -> V<ScriptQueryBuilder> {
         profiling::function_scope!("with");
         let mut builder = query.into_inner();
         builder.with_component(with.into_inner());
-        Val(builder)
+        V(builder)
     }
 
     /// Adds a component to filter the query by. This component will NOT be retrieved.
@@ -985,13 +1018,13 @@ impl ScriptQueryBuilder {
     /// Returns:
     /// * `query`: The query with the component added
     fn without(
-        query: Val<ScriptQueryBuilder>,
-        without: Val<ScriptComponentRegistration>,
-    ) -> Val<ScriptQueryBuilder> {
+        query: V<ScriptQueryBuilder>,
+        without: V<ScriptComponentRegistration>,
+    ) -> V<ScriptQueryBuilder> {
         profiling::function_scope!("without");
         let mut builder = query.into_inner();
         builder.without_component(without.into_inner());
-        Val(builder)
+        V(builder)
     }
 
     /// Builds the query and retrieves the entities and component references.
@@ -1003,20 +1036,20 @@ impl ScriptQueryBuilder {
     /// * `result`: The entities and component references that match the query.
     fn build(
         ctxt: FunctionCallContext,
-        query: Val<ScriptQueryBuilder>,
-    ) -> Result<Vec<Val<ScriptQueryResult>>, InteropError> {
+        query: V<ScriptQueryBuilder>,
+    ) -> Result<Vec<V<ScriptQueryResult>>, InteropError> {
         profiling::function_scope!("build");
         let world = ctxt.world()?;
         let builder = query.into_inner();
         let result = world.query(builder)?;
-        let result = result.into_iter().map(Val).collect::<Vec<_>>();
+        let result = result.into_iter().map(V).collect::<Vec<_>>();
         Ok(result)
     }
 }
 
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "script_query_result_functions",
     core
 )]
@@ -1027,9 +1060,9 @@ impl ScriptQueryResult {
     /// * `query`: The query result to retrieve the entity from.
     /// Returns:
     /// * `entity`: The entity from the query result.
-    fn entity(query: Ref<ScriptQueryResult>) -> Val<Entity> {
+    fn entity(query: R<ScriptQueryResult>) -> V<Entity> {
         profiling::function_scope!("entity");
-        Val::new(query.entity)
+        V::new(query.entity)
     }
 
     /// Retrieves the components from the query result.
@@ -1040,7 +1073,7 @@ impl ScriptQueryResult {
     /// * `query`: The query result to retrieve the components from.
     /// Returns:
     /// * `components`: The components from the query result.
-    fn components(query: Ref<ScriptQueryResult>) -> Vec<ReflectReference> {
+    fn components(query: R<ScriptQueryResult>) -> Vec<ReflectReference> {
         profiling::function_scope!("components");
         query.components.to_vec()
     }
@@ -1048,7 +1081,7 @@ impl ScriptQueryResult {
 
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "reflect_schedule_functions",
     core
 )]
@@ -1061,8 +1094,8 @@ impl ReflectSchedule {
     /// * `systems`: The systems in the schedule.
     fn systems(
         ctxt: FunctionCallContext,
-        schedule: Ref<ReflectSchedule>,
-    ) -> Result<Vec<Val<ReflectSystem>>, InteropError> {
+        schedule: R<ReflectSchedule>,
+    ) -> Result<Vec<V<ReflectSystem>>, InteropError> {
         profiling::function_scope!("systems");
         let world = ctxt.world()?;
         let systems = world.systems(&schedule);
@@ -1078,9 +1111,9 @@ impl ReflectSchedule {
     /// * `system`: The system with the given name, if it exists.
     fn get_system_by_name(
         ctxt: FunctionCallContext,
-        schedule: Ref<ReflectSchedule>,
+        schedule: R<ReflectSchedule>,
         name: String,
-    ) -> Result<Option<Val<ReflectSystem>>, InteropError> {
+    ) -> Result<Option<V<ReflectSystem>>, InteropError> {
         profiling::function_scope!("system_by_name");
         let world = ctxt.world()?;
         let system = world.systems(&schedule)?;
@@ -1101,7 +1134,7 @@ impl ReflectSchedule {
     /// * `dot`: The dot graph string.
     fn render_dot(
         ctxt: FunctionCallContext,
-        schedule: Ref<ReflectSchedule>,
+        schedule: R<ReflectSchedule>,
     ) -> Result<String, InteropError> {
         profiling::function_scope!("render_dot");
         let world = ctxt.world()?;
@@ -1120,7 +1153,7 @@ impl ReflectSchedule {
 
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "reflect_system_functions",
     core
 )]
@@ -1130,7 +1163,7 @@ impl ReflectSystem {
     /// * `system`: The system to retrieve the identifier from.
     /// Returns:
     /// * `identifier`: The identifier of the system, e.g. `my_system`
-    fn identifier(system: Ref<ReflectSystem>) -> String {
+    fn identifier(system: R<ReflectSystem>) -> String {
         profiling::function_scope!("identifier");
         system.identifier().to_string()
     }
@@ -1140,7 +1173,7 @@ impl ReflectSystem {
     /// * `system`: The system to retrieve the path from.
     /// Returns:
     /// * `path`: The full path of the system, e.g. `my_crate::systems::my_system<T>`
-    fn path(system: Ref<ReflectSystem>) -> String {
+    fn path(system: R<ReflectSystem>) -> String {
         profiling::function_scope!("path");
         system.path().to_string()
     }
@@ -1148,7 +1181,7 @@ impl ReflectSystem {
 
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "script_system_builder_functions",
     core
 )]
@@ -1161,9 +1194,9 @@ impl ScriptSystemBuilder {
     /// Returns:
     /// * `builder`: The system builder with the query added.
     fn query(
-        builder: Val<ScriptSystemBuilder>,
-        query: Val<ScriptQueryBuilder>,
-    ) -> Result<Val<ScriptSystemBuilder>, InteropError> {
+        builder: V<ScriptSystemBuilder>,
+        query: V<ScriptQueryBuilder>,
+    ) -> Result<V<ScriptSystemBuilder>, InteropError> {
         profiling::function_scope!("query");
         let mut builder = builder.into_inner();
         builder.query(query.into_inner());
@@ -1178,9 +1211,9 @@ impl ScriptSystemBuilder {
     /// Returns:
     /// * `builder`: The system builder with the resource added.
     fn resource(
-        builder: Val<ScriptSystemBuilder>,
-        resource: Val<ScriptResourceRegistration>,
-    ) -> Val<ScriptSystemBuilder> {
+        builder: V<ScriptSystemBuilder>,
+        resource: V<ScriptResourceRegistration>,
+    ) -> V<ScriptSystemBuilder> {
         profiling::function_scope!("resource");
         let mut builder = builder.into_inner();
         builder.resource(resource.into_inner());
@@ -1192,7 +1225,7 @@ impl ScriptSystemBuilder {
     /// * `builder`: The system builder to make exclusive.
     /// Returns:
     /// * `builder`: The system builder that is now exclusive.
-    fn exclusive(builder: Val<ScriptSystemBuilder>) -> Val<ScriptSystemBuilder> {
+    fn exclusive(builder: V<ScriptSystemBuilder>) -> V<ScriptSystemBuilder> {
         profiling::function_scope!("exclusive");
         let mut builder = builder.into_inner();
         builder.exclusive(true);
@@ -1208,14 +1241,11 @@ impl ScriptSystemBuilder {
     /// * `system`: The system to run after.
     /// Returns:
     /// * `builder`: The system builder with the dependency added.
-    fn after(
-        builder: Val<ScriptSystemBuilder>,
-        system: Val<ReflectSystem>,
-    ) -> Val<ScriptSystemBuilder> {
+    fn after(builder: V<ScriptSystemBuilder>, system: V<ReflectSystem>) -> V<ScriptSystemBuilder> {
         profiling::function_scope!("after");
         let mut builder = builder.into_inner();
         builder.after_system(system.into_inner());
-        Val(builder)
+        V(builder)
     }
 
     /// Specifies the system is to run *before* the given system.
@@ -1227,20 +1257,17 @@ impl ScriptSystemBuilder {
     /// * `system`: The system to run before.
     /// Returns:
     /// * `builder`: The system builder with the dependency added.
-    fn before(
-        builder: Val<ScriptSystemBuilder>,
-        system: Val<ReflectSystem>,
-    ) -> Val<ScriptSystemBuilder> {
+    fn before(builder: V<ScriptSystemBuilder>, system: V<ReflectSystem>) -> V<ScriptSystemBuilder> {
         profiling::function_scope!("before");
         let mut builder = builder.into_inner();
         builder.before_system(system.into_inner());
-        Val(builder)
+        V(builder)
     }
 }
 
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "script_attachment_functions",
     core
 )]
@@ -1252,10 +1279,10 @@ impl ScriptAttachment {
     /// Returns:    
     /// * `attachment`: The new script attachment.
     pub fn new_static_script(
-        script: Val<Handle<ScriptAsset>>,
-    ) -> Result<Val<ScriptAttachment>, InteropError> {
+        script: V<Handle<ScriptAsset>>,
+    ) -> Result<V<ScriptAttachment>, InteropError> {
         profiling::function_scope!("new_static_script");
-        Ok(Val(ScriptAttachment::StaticScript(script.into_inner())))
+        Ok(V(ScriptAttachment::StaticScript(script.into_inner())))
     }
 
     /// Creates a new script attachment descriptor for an entity attached script.
@@ -1266,11 +1293,11 @@ impl ScriptAttachment {
     /// Returns:
     /// * `attachment`: The new script attachment for the entity.
     pub fn new_entity_script(
-        entity: Val<Entity>,
-        script: Val<Handle<ScriptAsset>>,
-    ) -> Result<Val<ScriptAttachment>, InteropError> {
+        entity: V<Entity>,
+        script: V<Handle<ScriptAsset>>,
+    ) -> Result<V<ScriptAttachment>, InteropError> {
         profiling::function_scope!("new_entity_script");
-        Ok(Val(ScriptAttachment::EntityScript(
+        Ok(V(ScriptAttachment::EntityScript(
             *entity,
             script.into_inner(),
         )))
@@ -1279,7 +1306,7 @@ impl ScriptAttachment {
 
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "script_handle_functions",
     core
 )]
@@ -1291,7 +1318,7 @@ impl Handle<ScriptAsset> {
     /// * `handle`: The handle to the script asset.
     /// Returns:
     /// * `path`: The asset path of the script asset.
-    fn asset_path(ctxt: FunctionCallContext, handle: Ref<Handle<ScriptAsset>>) -> Option<String> {
+    fn asset_path(ctxt: FunctionCallContext, handle: R<Handle<ScriptAsset>>) -> Option<String> {
         profiling::function_scope!("path");
         handle.path().map(|p| p.to_string()).or_else(|| {
             ctxt.world().ok().and_then(|w| {
@@ -1305,9 +1332,51 @@ impl Handle<ScriptAsset> {
     }
 }
 
+/// globals which are being registered at lower level within each language plugin.
 #[script_bindings(
     remote,
-    bms_core_path = "bevy_mod_scripting_core",
+    bms_bindings_path = "bevy_mod_scripting_bindings",
+    name = "global_namespace_dummy_functions",
+    unregistered,
+    use_dummy_registry
+)]
+impl GlobalNamespace {
+    /// Registers a "frozen" callback handler,
+    ///
+    /// For example, this code:
+    ///
+    /// ```lua
+    /// register_callback("on_script_unloaded", my_unload_handler)
+    ///
+    /// function my_unload_handler()
+    ///     print("handling unload!")
+    /// end
+    /// ```
+    ///
+    /// would call the `my_unload_handler` function, whenever the `on_script_unloaded` callback is triggered, which is when your script is about to be unloaded.
+    ///
+    /// Registered callbacks take precedence over free-standing function callbacks, i.e. the below top level function:
+    /// ```lua
+    /// function on_script_unloaded()
+    ///     print("freestanding unload handler!")
+    /// end
+    /// ```
+    ///
+    /// would be a valid handler, but if a registered callback existed, it would be called instead.
+    ///
+    /// Arguments:
+    /// * `callback`: the callback label to register this function against.
+    /// * `function`: the callback function which will be stored as a handler for this callback label.
+    fn register_callback(callback: String, function: DynamicScriptFunction) {
+        // to avoid clippy unused errors.
+        println!("dummy called!: {callback:?}, {function:?}");
+    }
+}
+
+/// Globals registered by us
+#[script_bindings(
+    remote,
+    bms_bindings_path = "bevy_mod_scripting_bindings",
     name = "global_namespace_functions",
     unregistered
 )]
@@ -1322,8 +1391,8 @@ impl GlobalNamespace {
     fn construct(
         ctxt: FunctionCallContext,
         registration: Union<
-            Val<ScriptTypeRegistration>,
-            Union<Val<ScriptComponentRegistration>, Val<ScriptResourceRegistration>>,
+            V<ScriptTypeRegistration>,
+            Union<V<ScriptComponentRegistration>, V<ScriptResourceRegistration>>,
         >,
         payload: HashMap<String, ScriptValue>,
     ) -> Result<ReflectReference, InteropError> {
@@ -1363,9 +1432,60 @@ impl GlobalNamespace {
     /// * `builder`: The system builder
     fn system_builder(
         callback: String,
-        attachment: Val<ScriptAttachment>,
-    ) -> Result<Val<ScriptSystemBuilder>, InteropError> {
+        attachment: V<ScriptAttachment>,
+    ) -> Result<V<ScriptSystemBuilder>, InteropError> {
         Ok(ScriptSystemBuilder::new(callback.into(), attachment.into_inner()).into())
+    }
+
+    /// Unpacks, a list of values, into many separate values.
+    ///
+    /// Arguments:
+    /// * `values`: The list of values to uncurry
+    /// Returns:
+    /// * `tuple`: The tuple of all values provided
+    fn unpack_args(values: VecDeque<ScriptValue>) -> VariadicTuple {
+        VariadicTuple(values)
+    }
+
+    /// Packs, a variable amount of values, into a single list.
+    ///
+    /// Arguments:
+    /// * `tuple`: The tuple of values to curry
+    /// Returns:
+    /// * `values`: The list of values destructured from the tuple
+    fn pack_args(tuple: VariadicTuple) -> VecDeque<ScriptValue> {
+        tuple.0
+    }
+
+    /// Logs a `Information` level message to the console
+    /// Arguments:
+    /// * `message`: the message to log
+    fn log_info(message: String) {
+        bevy_log::info!(message)
+    }
+
+    /// Logs a `Warning` level message to the console
+    /// * `message`: the message to log
+    fn log_warn(message: String) {
+        bevy_log::warn!(message)
+    }
+
+    /// Logs a `Error` level message to the console
+    /// * `message`: the message to log
+    fn log_error(message: String) {
+        bevy_log::error!(message)
+    }
+
+    /// Logs a `Debug` level message to the console
+    /// * `message`: the message to log
+    fn log_debug(message: String) {
+        bevy_log::debug!(message)
+    }
+
+    /// Logs a `Trace` level message to the console
+    /// * `message`: the message to log
+    fn log_trace(message: String) {
+        bevy_log::trace!(message)
     }
 }
 
@@ -1397,5 +1517,6 @@ pub fn register_core_functions(app: &mut App) {
         register_script_handle_functions(world);
 
         register_global_namespace_functions(world);
+        register_global_namespace_dummy_functions(world);
     }
 }

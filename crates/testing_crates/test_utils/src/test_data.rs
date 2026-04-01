@@ -1,4 +1,7 @@
-use std::{alloc::Layout, collections::HashMap};
+use std::{
+    alloc::Layout,
+    collections::{HashMap, HashSet},
+};
 
 use bevy_app::{App, ScheduleRunnerPlugin, TaskPoolPlugin};
 use bevy_diagnostic::FrameCountPlugin;
@@ -6,7 +9,7 @@ use bevy_log::LogPlugin;
 use bevy_time::TimePlugin;
 
 use ::{
-    bevy_asset::AssetPlugin,
+    bevy_asset::{Asset, AssetApp, AssetPlugin},
     bevy_diagnostic::DiagnosticsPlugin,
     bevy_ecs::{component::*, prelude::*, world::World},
     bevy_reflect::{prelude::*, *},
@@ -24,6 +27,33 @@ impl TestComponent {
         Self {
             strings: vec!["Initial".to_string(), "Value".to_string()],
         }
+    }
+}
+
+/// Test component with Reflect and ReflectComponent registered
+#[derive(Resource, Reflect, PartialEq, Eq, Debug, Hash)]
+#[reflect(Resource)]
+pub struct SimpleType {
+    pub inner: String,
+}
+
+impl SimpleType {
+    pub fn init() -> Self {
+        Self {
+            inner: String::from("initial"),
+        }
+    }
+}
+
+#[derive(Asset, Reflect, PartialEq, Debug, Clone)]
+pub struct TestAsset {
+    pub value: i32,
+    pub name: String,
+}
+
+impl TestAsset {
+    pub fn new(value: i32, name: String) -> Self {
+        Self { value, name }
     }
 }
 
@@ -146,6 +176,8 @@ pub struct TestResourceWithVariousFields {
     pub bool: bool,
     pub vec_usize: Vec<usize>,
     pub string_map: HashMap<String, String>,
+    pub string_set: HashSet<String>,
+    pub simple_type_map: HashMap<SimpleType, String>,
 }
 
 impl TestResourceWithVariousFields {
@@ -157,10 +189,30 @@ impl TestResourceWithVariousFields {
             float: 69.0,
             bool: true,
             vec_usize: vec![1, 2, 3, 4, 5],
-            string_map: vec![("foo", "bar"), ("zoo", "zed")]
-                .into_iter()
-                .map(|(a, b)| (a.to_owned(), b.to_owned()))
-                .collect(),
+            string_map: HashMap::from_iter(vec![
+                (String::from("foo"), String::from("bar")),
+                (String::from("zoo"), String::from("zed")),
+            ]),
+            string_set: HashSet::from_iter(vec![
+                String::from("foo"),
+                String::from("bar"),
+                String::from("zoo"),
+                String::from("zed"),
+            ]),
+            simple_type_map: HashMap::from_iter(vec![
+                (
+                    SimpleType {
+                        inner: String::from("foo"),
+                    },
+                    String::from("bar"),
+                ),
+                (
+                    SimpleType {
+                        inner: String::from("zoo"),
+                    },
+                    String::from("zed"),
+                ),
+            ]),
         }
     }
 }
@@ -215,7 +267,7 @@ impl SimpleEnum {
 }
 
 pub(crate) const TEST_COMPONENT_ID_START: usize = 20;
-pub(crate) const TEST_ENTITY_ID_START: u32 = 0;
+pub(crate) const TEST_ENTITY_ID_START: u32 = 9;
 
 pub trait GetTestComponentId {
     fn test_component_id() -> ComponentId;
@@ -240,7 +292,7 @@ macro_rules! impl_test_component_ids {
 
             impl GetTestEntityId for $comp_type {
                 fn test_entity_id() -> Entity {
-                    Entity::from_raw(TEST_ENTITY_ID_START + $comp_id)
+                    Entity::from_raw_u32(TEST_ENTITY_ID_START + $comp_id).unwrap()
                 }
             }
         )*
@@ -254,13 +306,17 @@ macro_rules! impl_test_component_ids {
 
         pub(crate) fn init_all_components(world: &mut World, registry: &mut TypeRegistry) {
             $(
+                // world
+                //     .components()
+                //     .iter_registered()
+                //     .for_each(|c| println!("--> {:?}", c));
                 world.register_component::<$comp_type>();
                 registry.register::<$comp_type>();
                 let registered_id = world.component_id::<$comp_type>().unwrap().index();
                 assert_eq!(registered_id, TEST_COMPONENT_ID_START + $comp_id, "Test setup failed. Did you register components before running setup_world?: {}", stringify!($comp_type));
                 let entity = world.spawn(<$comp_type>::init()).id();
-                assert_eq!(entity.index(), TEST_ENTITY_ID_START + $comp_id, "Test setup failed. Did you spawn entities before running setup_world?: {}", stringify!($comp_type));
-                assert_eq!(entity.generation(), 1, "Test setup failed. Did you spawn entities before running setup_world?: {}", stringify!($comp_type));
+                assert_eq!(entity.index().index(), TEST_ENTITY_ID_START + $comp_id, "Test setup failed. Did you spawn entities before running setup_world?: {}", stringify!($comp_type));
+                assert_eq!(entity.generation(), bevy_ecs::entity::EntityGeneration::FIRST, "Test setup failed. Did you spawn entities before running setup_world?: {}", stringify!($comp_type));
             )*
             $(
                 world.insert_resource::<$res_type>(<$res_type>::init());
@@ -286,8 +342,8 @@ macro_rules! impl_test_component_ids {
     };
 }
 
-impl_test_component_ids!(
-    [   TestComponent => 0,
+impl_test_component_ids!([
+        TestComponent => 0,
         CompWithFromWorld => 1,
         CompWithDefault => 2,
         CompWithDefaultAndComponentData => 3,
@@ -302,12 +358,28 @@ impl_test_component_ids!(
         TestResource => 10,
         ResourceWithDefault => 11,
         TestResourceWithVariousFields => 12,
+        SimpleType => 13
     ]
 );
 
 fn init_world<F: FnOnce(&mut World, &mut TypeRegistry)>(world: &mut World, init: F) {
     let type_registry = world.get_resource_or_init::<AppTypeRegistry>().clone();
     let mut type_registry_guard = type_registry.0.write();
+
+    // bevy now spawns an ineternal component `bevy_ecs::event::EventWrapperComponent<bevy_ecs::archetype::ArchetypeCreated>`
+    // when an entity with a component is inserted :shrug:, make that happen early
+    #[derive(Component)]
+    pub struct Dummy;
+    world.register_component::<Dummy>();
+    world.spawn((Dummy,));
+
+    if world.components().len() > TEST_COMPONENT_ID_START {
+        panic!("world has more components than the first test component ID requires")
+    }
+
+    if world.entities().len() > TEST_ENTITY_ID_START {
+        panic!("world has more entities than the first test component ID requires")
+    }
 
     while world.components().len() < TEST_COMPONENT_ID_START {
         unsafe {
@@ -318,8 +390,13 @@ fn init_world<F: FnOnce(&mut World, &mut TypeRegistry)>(world: &mut World, init:
                 None,
                 true,
                 ComponentCloneBehavior::Default,
+                None,
             ))
         };
+    }
+
+    while world.entities().len() < TEST_ENTITY_ID_START {
+        world.spawn_empty();
     }
 
     init_all_components(world, &mut type_registry_guard);
@@ -361,6 +438,10 @@ pub fn setup_integration_test<F: FnOnce(&mut World, &mut TypeRegistry)>(init: F)
             ..Default::default()
         },
     ));
+
+    app.init_asset::<TestAsset>();
+    app.register_asset_reflect::<TestAsset>();
+
     app
 }
 

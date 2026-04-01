@@ -19,3 +19,7 @@ assets/scripts/tlconfig.lua
 
 /assets/**/*.lad.json
 /docs/src/ladfiles/*.lad.json
+/assets/**/bindings.lua
+
+node_modules
+*.vsix
