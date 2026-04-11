@@ -7,7 +7,6 @@ use bevy_ecs::{
     query::{Access, AccessConflicts},
     storage::SparseSetIndex,
 };
-use bevy_mod_scripting_bindings::access_map::ReflectAccessId;
 
 use fixedbitset::FixedBitSet;
 
@@ -140,7 +139,7 @@ fn individual_conflicts(conflicts: AccessConflicts) -> FixedBitSet {
     }
 }
 
-pub(crate) fn get_all_access_ids(access: &Access) -> Vec<(ReflectAccessId, bool)> {
+pub(crate) fn get_all_access_ids(access: &Access) -> Vec<(ComponentId, bool)> {
     let mut access_all_read = Access::default();
     access_all_read.read_all();
 
@@ -157,16 +156,10 @@ pub(crate) fn get_all_access_ids(access: &Access) -> Vec<(ReflectAccessId, bool)
 
     let mut result = Vec::new();
     for c in read.ones() {
-        result.push((
-            ReflectAccessId::for_component_id(ComponentId::get_sparse_set_index(c)),
-            false,
-        ));
+        result.push((ComponentId::get_sparse_set_index(c), false));
     }
     for c in written.ones() {
-        result.push((
-            ReflectAccessId::for_component_id(ComponentId::get_sparse_set_index(c)),
-            true,
-        ));
+        result.push((ComponentId::get_sparse_set_index(c), true));
     }
 
     result

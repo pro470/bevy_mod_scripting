@@ -11,6 +11,7 @@ use bevy_mod_scripting_derive::DebugWithTypeInfo;
 use bevy_mod_scripting_display::{
     DebugWithTypeInfo, DebugWithTypeInfoBuilder, DisplayWithTypeInfo,
 };
+use bevy_mod_scripting_world::{WorldAccessRange, WorldGuard};
 use bevy_platform::collections::HashMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{
@@ -18,7 +19,7 @@ use std::{
     cmp::Ordering,
     fmt::{Display, Formatter},
     hash::Hasher,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{Arc, atomic::AtomicUsize},
 };
 
 /// The path used for the total number of allocations diagnostic
@@ -32,13 +33,19 @@ pub const ALLOCATOR_TOTAL_COLLECTED_DIAG_PATH: DiagnosticPath =
 /// Unique identifier for an allocation
 #[derive(Clone, DebugWithTypeInfo)]
 #[debug_with_type_info(bms_display_path = "bevy_mod_scripting_display")]
-pub struct ReflectAllocationId(pub(crate) Arc<u64>);
+pub struct ReflectAllocationId(pub(crate) Arc<usize>);
+
+impl From<&ReflectAllocationId> for WorldAccessRange {
+    fn from(val: &ReflectAllocationId) -> Self {
+        WorldAccessRange::External(*val.0)
+    }
+}
 
 impl DisplayWithTypeInfo for ReflectAllocationId {
     fn display_with_type_info(
         &self,
         f: &mut std::fmt::Formatter<'_>,
-        _type_info_provider: Option<&dyn bevy_mod_scripting_display::GetTypeInfo>,
+        _type_info_provider: Option<&WorldGuard>,
     ) -> std::fmt::Result {
         write!(f, "{}", self.id())
     }
@@ -46,12 +53,12 @@ impl DisplayWithTypeInfo for ReflectAllocationId {
 
 impl ReflectAllocationId {
     /// Returns the id of the allocation
-    pub fn id(&self) -> u64 {
+    pub fn id(&self) -> usize {
         *self.0
     }
 
     /// Creates a new [`ReflectAllocationId`] from its id
-    pub(crate) fn new(id: u64) -> Self {
+    pub(crate) fn new(id: usize) -> Self {
         Self(Arc::new(id))
     }
 
@@ -119,7 +126,7 @@ impl DebugWithTypeInfo for ReflectAllocation {
     fn to_string_with_type_info(
         &self,
         f: &mut std::fmt::Formatter<'_>,
-        type_info_provider: Option<&dyn bevy_mod_scripting_display::GetTypeInfo>,
+        type_info_provider: Option<&WorldGuard>,
     ) -> std::fmt::Result {
         f.debug_tuple_with_type_info("ReflectAllocation", type_info_provider)
             .field(&((self.0.get() as *mut ()) as usize))
@@ -203,7 +210,7 @@ impl ReflectAllocator {
 
     /// Allocates a new boxed `PartialReflect` value and returns an [`ReflectAllocationId`] which can be used to access it later.
     pub fn allocate_boxed(&mut self, value: Box<dyn PartialReflect>) -> ReflectAllocationId {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
         let id =
             ReflectAllocationId::new(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));

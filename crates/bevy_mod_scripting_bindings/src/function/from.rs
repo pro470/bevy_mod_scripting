@@ -1,9 +1,9 @@
 //! This module contains the [`FromScript`] trait and its implemenations.
 
-use crate::{
-    ReflectReference, ScriptValue, WorldGuard, access_map::ReflectAccessId, error::InteropError,
-    script_value::VariadicTuple,
-};
+use super::script_function::{DynamicScriptFunction, DynamicScriptFunctionMut};
+use crate::{ReflectReference, ScriptValue, error::InteropError, script_value::VariadicTuple};
+use bevy_mod_scripting_world::WorldAccessRange;
+use bevy_mod_scripting_world::WorldGuard;
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_reflect::{FromReflect, Reflect};
 use nonmax::NonMaxU32;
@@ -14,8 +14,6 @@ use std::{
     ops::{Deref, DerefMut},
     path::PathBuf,
 };
-
-use super::script_function::{DynamicScriptFunction, DynamicScriptFunctionMut};
 
 /// Describes the procedure for constructing a value of type `T` from a [`ScriptValue`].
 ///
@@ -275,8 +273,7 @@ impl<T: FromReflect> FromScript for R<'_, T> {
     ) -> Result<Self::This<'_>, InteropError> {
         match value {
             ScriptValue::Reference(reflect_reference) => {
-                let raid = ReflectAccessId::for_reference(reflect_reference.base.base_id.clone());
-
+                let raid: WorldAccessRange = (&reflect_reference.base.base_id).into();
                 if world.claim_read_access(raid) {
                     // Safety: we just claimed access
                     let ref_ = unsafe { reflect_reference.reflect_unsafe_non_empty(world) }?;
@@ -290,7 +287,6 @@ impl<T: FromReflect> FromScript for R<'_, T> {
                 } else {
                     Err(InteropError::cannot_claim_access(
                         raid,
-                        world.get_access_location(raid),
                         format!("In conversion to type: R<{}>", std::any::type_name::<T>()),
                     ))
                 }
@@ -348,7 +344,7 @@ impl<T: FromReflect> FromScript for M<'_, T> {
     ) -> Result<Self::This<'_>, InteropError> {
         match value {
             ScriptValue::Reference(reflect_reference) => {
-                let raid = ReflectAccessId::for_reference(reflect_reference.base.base_id.clone());
+                let raid: WorldAccessRange = (&reflect_reference.base.base_id).into();
 
                 if world.claim_write_access(raid) {
                     // Safety: we just claimed write access
@@ -361,7 +357,6 @@ impl<T: FromReflect> FromScript for M<'_, T> {
                 } else {
                     Err(InteropError::cannot_claim_access(
                         raid,
-                        world.get_access_location(raid),
                         format!("In conversion to type: Mut<{}>", std::any::type_name::<T>()),
                     ))
                 }
@@ -586,6 +581,16 @@ impl<T1, T2> Union<T1, T2> {
     /// Create a new union with the left value.
     pub fn new_left(value: T1) -> Self {
         Union(Ok(value))
+    }
+
+    /// Returns true if this union represents the left kind of value
+    pub fn is_left(&self) -> bool {
+        matches!(self, Union(Ok(_)))
+    }
+
+    /// Returns true if this union represents the right kind of value
+    pub fn is_right(&self) -> bool {
+        matches!(self, Union(Err(_)))
     }
 
     /// Create a new union with the right value.

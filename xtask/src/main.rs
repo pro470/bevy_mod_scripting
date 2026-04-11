@@ -1,9 +1,9 @@
 use std::{
     collections::HashMap,
     ffi::OsString,
-    io::Write,
+    io::{Write, stdout},
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Child, Command, Output},
     str::FromStr,
 };
 
@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use strum::{IntoEnumIterator, VariantNames};
 use xtask::{
     BindingCrate, Feature, FeatureGroup, Features, GlobalArgs, Meta, codegen_crate_dir,
-    main_workspace_cargo_metadata, prepare_codegen, read_rust_toolchain, relative_workspace_dir,
-    run_system_command, run_workspace_command, workspace_dir,
+    main_workspace_cargo_metadata, make_system_command, prepare_codegen, read_rust_toolchain,
+    relative_workspace_dir, run_system_command, run_workspace_command, workspace_dir,
 };
 
 /// Enumerates the binaries available in the project and their paths
@@ -186,6 +186,7 @@ impl App {
             Xtasks::Bench {
                 name,
                 enable_profiling: profile,
+                tracy_capture_name,
             } => {
                 cmd.arg("bench");
 
@@ -195,6 +196,10 @@ impl App {
 
                 if profile {
                     cmd.arg("--profile");
+                }
+
+                if let Some(capture_tracy) = tracy_capture_name {
+                    cmd.arg("--capture-tracy").arg(capture_tracy);
                 }
             }
         }
@@ -432,6 +437,11 @@ enum Xtasks {
         /// Whether or not to enable tracy profiling
         #[clap(long, default_value = "false", help = "Enable tracy profiling")]
         enable_profiling: bool,
+        #[clap(
+            long,
+            help = "The name to give to the captured trace, if not passed won't capture trace"
+        )]
+        tracy_capture_name: Option<String>,
         /// The name argument passed to `cargo bench`, can be used in combination with profile to selectively profile benchmarks
         #[clap(long, help = "The name argument passed to `cargo bench`")]
         name: Option<String>,
@@ -524,8 +534,15 @@ impl Xtasks {
             Xtasks::Bench {
                 name,
                 enable_profiling,
+                tracy_capture_name,
             } => {
-                let _ = Self::bench(app_settings, enable_profiling, name, false)?;
+                let _ = Self::bench(
+                    app_settings,
+                    enable_profiling,
+                    name,
+                    tracy_capture_name,
+                    false,
+                )?;
                 Ok(())
             }
         }?;
@@ -919,29 +936,46 @@ impl Xtasks {
         app_settings: GlobalArgs,
         profile: bool,
         name: Option<String>,
+        tracy_capture_name: Option<String>,
         capture_streams_in_output: bool,
     ) -> Result<Output> {
         log::info!("Profiling enabled: {profile}");
 
-        let mut features = Features::default();
+        struct DroppingChild(Child);
+        impl Drop for DroppingChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+            }
+        }
 
+        let mut features = Features::default();
+        let mut tracy_child_capture: Option<DroppingChild> = None;
         if profile {
             unsafe { std::env::set_var("ENABLE_PROFILING", "1") };
-            // features.push(Feature::BevyTracy);
             features.0.insert(Feature::ProfileWithTracy);
+            if let Some(trace_name) = tracy_capture_name {
+                let mut cmd = make_system_command(
+                    &app_settings,
+                    "tracy-capture",
+                    ["-o", &trace_name, "-a", "localhost"],
+                    None,
+                    capture_streams_in_output,
+                )?;
+                tracy_child_capture = Some(DroppingChild(cmd.spawn()?));
+            }
         } else {
             unsafe { std::env::set_var("RUST_LOG", "bevy_mod_scripting=error") };
         }
 
-        let args = if let Some(name) = name {
-            vec!["--".to_owned(), name]
-        } else {
-            vec![]
+        let mut args = vec!["--timings".to_owned()];
+
+        if let Some(name) = name {
+            args.extend(["--".to_owned(), name]);
         };
 
-        let output = run_workspace_command(
+        let mut output = run_workspace_command(
             // run with just lua54
-            &app_settings.with_features(features),
+            &app_settings.clone().with_features(features),
             "bench",
             "Failed to run benchmarks",
             args,
@@ -950,6 +984,24 @@ impl Xtasks {
         )
         .with_context(|| "when executing criterion benchmarks")?;
 
+        let workspace_dir = workspace_dir(&app_settings)?;
+        let metadata = main_workspace_cargo_metadata()?;
+        let crates = metadata
+            .workspace_packages()
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect::<Vec<String>>();
+
+        info!("Gathering build time for crates: {}", crates.join(","));
+
+        let additional_benchmark_lines = xtask::read_cargo_timings_report(&workspace_dir, crates)?;
+
+        if !capture_streams_in_output {
+            stdout().write(additional_benchmark_lines.as_bytes())?;
+        } else {
+            output.stdout.write(additional_benchmark_lines.as_bytes())?;
+        }
+        drop(tracy_child_capture);
         Ok(output)
     }
 
@@ -992,7 +1044,7 @@ impl Xtasks {
 
         // first of all run bench, and save output to a file
 
-        let result = Self::bench(app_settings, false, None, true)?;
+        let result = Self::bench(app_settings, false, None, None, true)?;
         let bench_file_path = PathBuf::from("./bencher_output.txt");
         let mut file = std::fs::File::create(&bench_file_path)?;
         file.write_all(&result.stdout)?;
